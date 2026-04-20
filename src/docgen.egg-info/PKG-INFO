@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: docgen
+Version: 0.1.0
+Summary: Deterministic project analyzer for source code documentation pipelines.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+
+# docgen
+
+Deterministic project analysis CLI that produces factual JSON artifacts for later LLM-assisted documentation.
