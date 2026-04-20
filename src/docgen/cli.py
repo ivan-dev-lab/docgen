@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from .analyzer import analyze_project
+from .llm.config import build_openrouter_config
 from .llm.explain_plan import write_explain_plan
+from .llm.openrouter_provider import OpenRouterProvider
 from .renderer import render_project
 
 
@@ -111,6 +114,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the explain-plan JSON file to create.",
     )
     explain_plan_parser.set_defaults(handler=run_explain_plan)
+
+    llm_smoke_parser = subparsers.add_parser(
+        "llm-smoke",
+        help="Run a provider smoke check without generating documentation.",
+    )
+    llm_smoke_parser.add_argument(
+        "--provider",
+        choices=["openrouter"],
+        required=True,
+        help="LLM provider to smoke test.",
+    )
+    llm_smoke_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate configuration without making a network call.",
+    )
+    llm_smoke_parser.add_argument(
+        "--model",
+        dest="model",
+        help="Optional model override. Defaults to the provider default.",
+    )
+    llm_smoke_parser.add_argument(
+        "--reasoning",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Enable provider reasoning when supported. Default: true.",
+    )
+    llm_smoke_parser.add_argument(
+        "--max-tokens",
+        dest="max_tokens",
+        type=int,
+        default=64,
+        help="Max tokens for the smoke request. Default: 64.",
+    )
+    llm_smoke_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for the smoke request. Default: 0.0.",
+    )
+    llm_smoke_parser.set_defaults(handler=run_llm_smoke)
     return parser
 
 
@@ -154,6 +202,45 @@ def run_explain_plan(args: argparse.Namespace) -> int:
     )
     print(f"Explain plan saved to: {explain_plan_path}")
     return 0
+
+
+def run_llm_smoke(args: argparse.Namespace) -> int:
+    if args.provider != "openrouter":
+        raise ValueError(f"Unsupported provider: {args.provider}")
+
+    config = build_openrouter_config(
+        model=args.model,
+        reasoning_enabled=args.reasoning,
+    )
+    provider = OpenRouterProvider(config=config)
+    if args.dry_run:
+        print(json.dumps(provider.dry_run_status(), ensure_ascii=False, indent=2))
+        return 0
+
+    result = provider.smoke(
+        model=args.model,
+        reasoning_enabled=args.reasoning,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+    )
+    payload = {
+        "provider": result.provider,
+        "model": result.model,
+        "status": "error" if result.error else "ok",
+        "content_preview": build_content_preview(result.content),
+        "usage": result.usage,
+        "reasoning_present": result.reasoning is not None,
+        "reasoning_details_present": result.reasoning_details_present,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def build_content_preview(content: str, limit: int = 160) -> str:
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
 
 
 def main(argv: list[str] | None = None) -> int:

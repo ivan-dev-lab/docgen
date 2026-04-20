@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -68,6 +69,19 @@ class FileDocRef:
     source_file: str
     doc_path: str
     exists: bool
+
+
+@dataclass
+class LLMCompletionResult:
+    provider: str
+    model: str
+    content: str
+    reasoning: Any | None
+    reasoning_details_present: bool
+    usage: dict[str, Any] | None
+    raw_response_type: str
+    finish_reason: str | None
+    error: str | None = None
 
 
 @dataclass

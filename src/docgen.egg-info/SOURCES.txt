@@ -9,13 +9,16 @@ src/docgen.egg-info/PKG-INFO
 src/docgen.egg-info/SOURCES.txt
 src/docgen.egg-info/dependency_links.txt
 src/docgen.egg-info/entry_points.txt
+src/docgen.egg-info/requires.txt
 src/docgen.egg-info/top_level.txt
 src/docgen/llm/__init__.py
 src/docgen/llm/config.py
 src/docgen/llm/context_builder.py
 src/docgen/llm/explain_plan.py
+src/docgen/llm/openrouter_provider.py
 src/docgen/llm/prompts.py
 src/docgen/llm/schemas.py
 tests/test_analyzer_cli.py
 tests/test_explain_plan_cli.py
+tests/test_llm_provider_cli.py
 tests/test_renderer_cli.py
