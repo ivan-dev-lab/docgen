@@ -4,9 +4,11 @@ src/docgen/__init__.py
 src/docgen/__main__.py
 src/docgen/analyzer.py
 src/docgen/cli.py
+src/docgen/renderer.py
 src/docgen.egg-info/PKG-INFO
 src/docgen.egg-info/SOURCES.txt
 src/docgen.egg-info/dependency_links.txt
 src/docgen.egg-info/entry_points.txt
 src/docgen.egg-info/top_level.txt
 tests/test_analyzer_cli.py
+tests/test_renderer_cli.py

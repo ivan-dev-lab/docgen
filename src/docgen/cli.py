@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .analyzer import analyze_project
+from .renderer import render_project
 
 
 def parse_cli_bool(value: str | bool) -> bool:
@@ -67,6 +68,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Include generated analysis outputs and packaging metadata. Default: false.",
     )
     analyze_parser.set_defaults(handler=run_analyze)
+
+    render_parser = subparsers.add_parser(
+        "render",
+        help="Render Markdown documentation from analysis JSON artifacts.",
+    )
+    render_parser.add_argument(
+        "--analysis",
+        dest="analysis_path",
+        required=True,
+        help="Directory containing the required analysis JSON artifacts.",
+    )
+    render_parser.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="Output directory for generated Markdown documentation.",
+    )
+    render_parser.set_defaults(handler=run_render)
     return parser
 
 
@@ -81,6 +100,19 @@ def run_analyze(args: argparse.Namespace) -> int:
         include_generated=args.include_generated,
     )
     print(f"Analysis artifacts saved to: {artifacts_dir}")
+    return 0
+
+
+def run_render(args: argparse.Namespace) -> int:
+    analysis_path = Path(args.analysis_path).expanduser()
+    output_path = Path(args.output_path).expanduser()
+    rendered_dir = render_project(
+        analysis_path,
+        output_path,
+        analysis_path_label=args.analysis_path,
+        output_path_label=args.output_path,
+    )
+    print(f"Rendered documentation saved to: {rendered_dir}")
     return 0
 
 
