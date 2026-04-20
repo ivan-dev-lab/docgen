@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from .analyzer import analyze_project
+from .llm.explain_plan import write_explain_plan
 from .renderer import render_project
 
 
@@ -86,6 +87,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory for generated Markdown documentation.",
     )
     render_parser.set_defaults(handler=run_render)
+
+    explain_plan_parser = subparsers.add_parser(
+        "explain-plan",
+        help="Build an LLM explain-plan JSON from analysis artifacts and generated docs.",
+    )
+    explain_plan_parser.add_argument(
+        "--analysis",
+        dest="analysis_path",
+        required=True,
+        help="Directory containing the required analysis JSON artifacts.",
+    )
+    explain_plan_parser.add_argument(
+        "--docs",
+        dest="docs_path",
+        required=True,
+        help="Directory containing generated factual Markdown documentation.",
+    )
+    explain_plan_parser.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="Path to the explain-plan JSON file to create.",
+    )
+    explain_plan_parser.set_defaults(handler=run_explain_plan)
     return parser
 
 
@@ -113,6 +138,21 @@ def run_render(args: argparse.Namespace) -> int:
         output_path_label=args.output_path,
     )
     print(f"Rendered documentation saved to: {rendered_dir}")
+    return 0
+
+
+def run_explain_plan(args: argparse.Namespace) -> int:
+    analysis_path = Path(args.analysis_path).expanduser()
+    docs_path = Path(args.docs_path).expanduser()
+    output_path = Path(args.output_path).expanduser()
+    explain_plan_path = write_explain_plan(
+        analysis_path,
+        docs_path,
+        output_path,
+        analysis_path_label=args.analysis_path,
+        docs_path_label=args.docs_path,
+    )
+    print(f"Explain plan saved to: {explain_plan_path}")
     return 0
 
 

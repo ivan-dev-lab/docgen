@@ -373,6 +373,51 @@ class RendererCliTests(unittest.TestCase):
         self.assertIn("нет данных", page_text)
         self.assertIn("pathlib", page_text)
 
+    def test_render_manifest_contains_file_pages_and_module_pages_for_live_facts(self) -> None:
+        analyze_result, analysis_dir = self.run_analysis(ROOT)
+        self.assertEqual(analyze_result.returncode, 0, msg=analyze_result.stderr or analyze_result.stdout)
+
+        output_dir = self.make_temp_dir() / "docs-generated"
+        render_result = self.run_render(analysis_dir, output_dir)
+        self.assertEqual(render_result.returncode, 0, msg=render_result.stderr or render_result.stdout)
+
+        manifest = self.read_json(output_dir / "doc-manifest.json")
+        self.assertIn("file_pages", manifest)
+        self.assertIn("module_pages", manifest)
+        self.assertTrue(manifest["file_pages"])
+        self.assertTrue(manifest["module_pages"])
+
+        analysis_function_index = self.read_json(analysis_dir / "function-index.json")
+        analysis_dependency_graph = self.read_json(analysis_dir / "dependency-graph.json")
+        fact_files = sorted(
+            {
+                str(entity.get("file") or "")
+                for entity in analysis_function_index.get("entities", [])
+                if entity.get("file")
+            }
+            | {
+                str(import_entry.get("source_file") or "")
+                for import_entry in analysis_dependency_graph.get("imports", [])
+                if import_entry.get("source_file")
+            }
+        )
+        mapped_files = {entry["source_file"] for entry in manifest["file_pages"]}
+        self.assertTrue(set(fact_files).issubset(mapped_files))
+
+        llm_entries = [
+            entry
+            for entry in manifest["file_pages"]
+            if "src/docgen/llm/" in entry.get("source_file", "").replace("\\", "/")
+        ]
+        self.assertTrue(llm_entries)
+        self.assertTrue(all(entry["doc_path"].startswith("files/") for entry in llm_entries))
+        self.assertTrue(all(entry["doc_path"] in manifest["generated_files"] for entry in llm_entries))
+
+        llm_module_entries = [entry for entry in manifest["module_pages"] if entry.get("name") == "llm"]
+        self.assertTrue(llm_module_entries)
+        self.assertTrue(all(entry["doc_path"].startswith("modules/") for entry in llm_module_entries))
+        self.assertTrue(all(entry["doc_path"] in manifest["generated_files"] for entry in llm_module_entries))
+
     def test_key_entity_sort_key_prefers_exported_high_confidence_class(self) -> None:
         entities = [
             {

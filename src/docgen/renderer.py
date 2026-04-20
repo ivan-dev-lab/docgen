@@ -144,6 +144,8 @@ def render_project(
         analysis_path_label=analysis_path_label or str(analysis_dir),
         output_path_label=output_path_label or str(output_dir),
         generated_files=generated_files + ["doc-manifest.json"],
+        file_pages=file_pages,
+        module_pages=modules,
         module_count=len(modules),
         module_page_count=len(modules),
         file_page_count=len(file_pages),
@@ -1551,6 +1553,8 @@ def build_doc_manifest(
     analysis_path_label: str,
     output_path_label: str,
     generated_files: list[str],
+    file_pages: list[dict[str, Any]],
+    module_pages: list[dict[str, Any]],
     module_count: int,
     module_page_count: int,
     file_page_count: int,
@@ -1574,9 +1578,41 @@ def build_doc_manifest(
         "function_index_path": "functions/function-index.md",
         "file_index_path": "files/index.md",
         "documentation_layout_version": DOCUMENTATION_LAYOUT_VERSION,
+        "file_pages": build_file_page_manifest_entries(file_pages),
+        "module_pages": build_module_page_manifest_entries(module_pages),
         "warnings": sorted(unique_strings(warnings)),
         "renderer_version": RENDERER_VERSION,
     }
+
+
+def build_file_page_manifest_entries(file_pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "source_file": str(page.get("path") or ""),
+            "doc_path": f"files/{page['slug']}.md",
+            "entity_count": len(page.get("entities", [])),
+            "import_count": len(page.get("imports", [])),
+        }
+        for page in sorted(file_pages, key=lambda item: str(item.get("path") or ""))
+        if page.get("slug")
+    ]
+
+
+def build_module_page_manifest_entries(module_pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": str(module.get("name") or "unknown"),
+            "type": str(module.get("type") or "unknown"),
+            "module_page_role": str(module.get("module_page_role") or determine_module_page_role(str(module.get("type") or "unknown"))),
+            "doc_path": f"modules/{module['slug']}.md",
+            "files": sorted(unique_strings(module.get("files", []))),
+            "source_files": sorted(unique_strings(module.get("source_files", []))),
+            "test_files": sorted(unique_strings(module.get("test_files", []))),
+            "related_files": sorted(unique_strings(module.get("related_files", []))),
+        }
+        for module in sorted(module_pages, key=module_sort_key)
+        if module.get("slug")
+    ]
 
 
 def cleanup_previous_generated_files(output_dir: Path) -> None:
