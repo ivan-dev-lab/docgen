@@ -258,6 +258,19 @@ class LlmProviderCliTests(unittest.TestCase):
             {"completion_tokens": 7, "prompt_tokens": 11, "total_tokens": 18},
         )
 
+    def test_complete_exposes_structured_content_from_parsed_message(self) -> None:
+        message = SimpleNamespace(content="", parsed={"verdict": "pass", "unsupported_claims": []})
+        fake_response = SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None)
+        provider = OpenRouterProvider(
+            config=build_openrouter_config(api_key="test-key"),
+            client=build_fake_client(fake_response),
+        )
+
+        result = provider.complete([{"role": "user", "content": "ping"}], reasoning_enabled=False)
+
+        self.assertEqual(result.content, "")
+        self.assertEqual(result.structured_content, {"verdict": "pass", "unsupported_claims": []})
+
     def test_provider_error_redacts_api_key(self) -> None:
         secret = "top-secret-key"
         fake_client = build_fake_client(error=RuntimeError(f"failure for {secret}"))

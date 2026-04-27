@@ -8,6 +8,8 @@ from pathlib import Path
 from .analyzer import analyze_project
 from .llm.config import build_openrouter_config
 from .llm.explain_plan import write_explain_plan
+from .llm.module_explainer import explain_module
+from .llm.module_verifier import DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS, verify_module
 from .llm.openrouter_provider import OpenRouterProvider
 from .renderer import render_project
 
@@ -159,6 +161,174 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sampling temperature for the smoke request. Default: 0.0.",
     )
     llm_smoke_parser.set_defaults(handler=run_llm_smoke)
+
+    explain_module_parser = subparsers.add_parser(
+        "explain-module",
+        help="Generate enhanced markdown for a single module from explain-plan.",
+    )
+    explain_module_parser.add_argument(
+        "--plan",
+        dest="plan_path",
+        required=True,
+        help="Path to explain-plan.json.",
+    )
+    explain_module_parser.add_argument(
+        "--module",
+        dest="module_name",
+        required=True,
+        help="Exact module name from explain-plan.modules[].name.",
+    )
+    explain_module_parser.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="Output markdown path for the enhanced module explanation.",
+    )
+    explain_module_parser.add_argument(
+        "--provider",
+        choices=["openrouter"],
+        default="openrouter",
+        help="LLM provider. Default: openrouter.",
+    )
+    explain_module_parser.add_argument(
+        "--model",
+        dest="model",
+        help="Optional model override. Defaults to explain-plan.model_plan.default_model.",
+    )
+    explain_module_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build context and prompt plan without making a network call.",
+    )
+    explain_module_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing output markdown file.",
+    )
+    explain_module_parser.add_argument(
+        "--force-skip",
+        action="store_true",
+        help="Allow live generation for modules marked with explain_mode=skip.",
+    )
+    explain_module_parser.add_argument(
+        "--allow-over-budget",
+        action="store_true",
+        help="Allow a live LLM call even if the estimated prompt stays over the max input token budget.",
+    )
+    explain_module_parser.add_argument(
+        "--max-input-tokens",
+        dest="max_input_tokens",
+        type=int,
+        help="Optional override for max input tokens.",
+    )
+    explain_module_parser.add_argument(
+        "--max-output-tokens",
+        dest="max_output_tokens",
+        type=int,
+        help="Optional override for max output tokens.",
+    )
+    explain_module_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature for the LLM request. Default: 0.2.",
+    )
+    explain_module_parser.add_argument(
+        "--reasoning",
+        nargs="?",
+        const=True,
+        default=None,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Override reasoning mode. Defaults to explain-plan.model_plan.reasoning_enabled.",
+    )
+    explain_module_parser.add_argument(
+        "--save-raw",
+        action="store_true",
+        help="Reserved for future stages. Not implemented in Stage 3C.",
+    )
+    explain_module_parser.set_defaults(handler=run_explain_module)
+
+    verify_module_parser = subparsers.add_parser(
+        "verify-module",
+        help="Verify one enhanced module explanation against factual context.",
+    )
+    verify_module_parser.add_argument(
+        "--plan",
+        dest="plan_path",
+        required=True,
+        help="Path to explain-plan.json.",
+    )
+    verify_module_parser.add_argument(
+        "--module",
+        dest="module_name",
+        required=True,
+        help="Exact module name from explain-plan.modules[].name.",
+    )
+    verify_module_parser.add_argument(
+        "--enhanced",
+        dest="enhanced_path",
+        required=True,
+        help="Enhanced markdown path to verify.",
+    )
+    verify_module_parser.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="Verification JSON report path.",
+    )
+    verify_module_parser.add_argument(
+        "--provider",
+        choices=["openrouter"],
+        default="openrouter",
+        help="LLM provider. Default: openrouter.",
+    )
+    verify_module_parser.add_argument(
+        "--model",
+        dest="model",
+        help="Optional model override. Defaults to explain-plan.model_plan.default_model.",
+    )
+    verify_module_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build verification plan without making a network call.",
+    )
+    verify_module_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing verification report and summary files.",
+    )
+    verify_module_parser.add_argument(
+        "--reasoning",
+        nargs="?",
+        const=True,
+        default=None,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Override reasoning mode. Default: false for verification.",
+    )
+    verify_module_parser.add_argument(
+        "--max-output-tokens",
+        dest="max_output_tokens",
+        type=int,
+        default=DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS,
+        help=f"Max output tokens for the verification request. Default: {DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS}.",
+    )
+    verify_module_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for verification. Default: 0.0.",
+    )
+    verify_module_parser.add_argument(
+        "--verification-mode",
+        choices=["same_context", "fallback_plan"],
+        default="same_context",
+        help="Context mode. Default: same_context.",
+    )
+    verify_module_parser.set_defaults(handler=run_verify_module)
     return parser
 
 
@@ -233,6 +403,78 @@ def run_llm_smoke(args: argparse.Namespace) -> int:
         "reasoning_details_present": result.reasoning_details_present,
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_explain_module(args: argparse.Namespace) -> int:
+    plan_path = Path(args.plan_path).expanduser()
+    output_path = Path(args.output_path).expanduser()
+    result = explain_module(
+        plan_path,
+        args.module_name,
+        output_path,
+        provider_name=args.provider,
+        model=args.model,
+        dry_run=args.dry_run,
+        force=args.force,
+        force_skip=args.force_skip,
+        allow_over_budget=args.allow_over_budget,
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        temperature=args.temperature,
+        reasoning=args.reasoning,
+        save_raw=args.save_raw,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    token_budget = result.get("token_budget")
+    if isinstance(token_budget, dict) and token_budget.get("prompt_budget_exceeded"):
+        delta = token_budget.get("prompt_budget_delta")
+        print(
+            f"Warning: actual prompt tokens exceeded max_input_tokens by {delta}.",
+            file=sys.stderr,
+        )
+    if isinstance(token_budget, dict) and token_budget.get("override_used"):
+        post = token_budget.get("post_reduction_estimated_prompt_tokens_with_margin")
+        max_input = token_budget.get("max_input_tokens")
+        print(
+            "Warning: --allow-over-budget was used; "
+            f"post-reduction estimated prompt tokens are {post} with max_input_tokens={max_input}.",
+            file=sys.stderr,
+        )
+    markdown_validation = result.get("markdown_validation")
+    if isinstance(markdown_validation, dict):
+        missing_sections = markdown_validation.get("missing_sections") or []
+        forbidden_hits = markdown_validation.get("forbidden_hits") or []
+        if not markdown_validation.get("required_sections_present") or forbidden_hits:
+            print(
+                "Warning: markdown validation reported issues: "
+                f"missing_sections={missing_sections}, forbidden_hits={forbidden_hits}.",
+                file=sys.stderr,
+            )
+    return 0
+
+
+def run_verify_module(args: argparse.Namespace) -> int:
+    result = verify_module(
+        Path(args.plan_path).expanduser(),
+        args.module_name,
+        Path(args.enhanced_path).expanduser(),
+        Path(args.output_path).expanduser(),
+        provider_name=args.provider,
+        model=args.model,
+        dry_run=args.dry_run,
+        force=args.force,
+        reasoning=args.reasoning,
+        max_output_tokens=args.max_output_tokens,
+        temperature=args.temperature,
+        verification_mode=args.verification_mode,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("structured_output_valid") is False:
+        print(
+            f"Warning: verification structured output invalid: {result.get('parse_errors')}",
+            file=sys.stderr,
+        )
     return 0
 
 

@@ -82,6 +82,7 @@ class LLMCompletionResult:
     raw_response_type: str
     finish_reason: str | None
     error: str | None = None
+    structured_content: Any | None = None
 
 
 @dataclass

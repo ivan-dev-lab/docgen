@@ -33,6 +33,7 @@ class OpenRouterProvider:
         reasoning_enabled: bool = DEFAULT_REASONING_ENABLED,
         max_tokens: int = 256,
         temperature: float = 0.2,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMCompletionResult:
         request_model = model or self.config.model or DEFAULT_OPENROUTER_MODEL
         request_payload: dict[str, Any] = {
@@ -41,6 +42,8 @@ class OpenRouterProvider:
             "max_tokens": max(1, int(max_tokens)),
             "temperature": float(temperature),
         }
+        if response_format is not None:
+            request_payload["response_format"] = response_format
         if reasoning_enabled:
             request_payload["extra_body"] = {"reasoning": {"enabled": True}}
 
@@ -121,16 +124,18 @@ def normalize_completion_response(
 
     reasoning = getattr(message, "reasoning", None)
     reasoning_details = getattr(message, "reasoning_details", None)
+    raw_content = getattr(message, "content", None)
     return LLMCompletionResult(
         provider=provider,
         model=model,
-        content=normalize_message_content(getattr(message, "content", None)),
+        content=normalize_message_content(raw_content),
         reasoning=reasoning,
         reasoning_details_present=bool(reasoning_details),
         usage=normalize_usage(getattr(response, "usage", None)),
         raw_response_type=type(response).__name__,
         finish_reason=getattr(first_choice, "finish_reason", None),
         error=None,
+        structured_content=extract_structured_message_content(message, raw_content),
     )
 
 
@@ -139,6 +144,8 @@ def normalize_message_content(content: Any) -> str:
         return ""
     if isinstance(content, str):
         return content
+    if isinstance(content, dict):
+        return json_dumps_safe(content)
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -146,6 +153,10 @@ def normalize_message_content(content: Any) -> str:
                 text = item.get("text")
                 if text is not None:
                     parts.append(str(text))
+                    continue
+                structured = extract_structured_content_item(item)
+                if structured is not None:
+                    parts.append(json_dumps_safe(structured))
                     continue
                 parts.append(str(item))
                 continue
@@ -156,6 +167,67 @@ def normalize_message_content(content: Any) -> str:
             parts.append(str(item))
         return "\n".join(part for part in parts if part)
     return str(content)
+
+
+def extract_structured_message_content(message: Any, raw_content: Any) -> Any | None:
+    for attr_name in ("parsed", "structured_content"):
+        value = getattr(message, attr_name, None)
+        if value is not None:
+            return normalize_structured_value(value)
+    if isinstance(raw_content, dict):
+        return without_reasoning_details(raw_content)
+    if isinstance(raw_content, list):
+        for item in raw_content:
+            if isinstance(item, dict):
+                structured = extract_structured_content_item(item)
+                if structured is not None:
+                    return structured
+    return None
+
+
+def extract_structured_content_item(item: dict[str, Any]) -> Any | None:
+    for key in ("json", "parsed", "structured_content", "output_json"):
+        if key in item:
+            return normalize_structured_value(item[key])
+    return None
+
+
+def normalize_structured_value(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return without_reasoning_details(value.model_dump())
+    if hasattr(value, "dict"):
+        return without_reasoning_details(value.dict())
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                import json
+
+                return without_reasoning_details(json.loads(stripped))
+            except Exception:
+                return value
+    return without_reasoning_details(value)
+
+
+def without_reasoning_details(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: without_reasoning_details(item)
+            for key, item in value.items()
+            if key != "reasoning_details"
+        }
+    if isinstance(value, list):
+        return [without_reasoning_details(item) for item in value]
+    return value
+
+
+def json_dumps_safe(value: Any) -> str:
+    try:
+        import json
+
+        return json.dumps(value, ensure_ascii=False)
+    except TypeError:
+        return str(value)
 
 
 def normalize_usage(usage: Any) -> dict[str, Any] | None:
