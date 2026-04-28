@@ -10,7 +10,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,60 @@ if str(SRC_ROOT) not in sys.path:
 
 from docgen.cli import main  # noqa: E402
 from docgen.ui_server import build_server_config, create_ui_server  # noqa: E402
+
+
+class FakeUiActionRunner:
+    def __init__(self) -> None:
+        self.actions: list[dict] = []
+        self.runs: list[dict] = []
+        self.next_entry: dict | None = None
+
+    def preview(self, action_type: str, *, modules=None, force: bool = False, allowed_modules=None) -> dict:
+        return {
+            "schema_version": "1.0",
+            "action_type": action_type,
+            "targets": modules or [],
+            "command": ["python", "-m", "docgen", action_type],
+            "network_may_be_used": action_type in {"explain_module", "verify_module"},
+            "risk_class": "no_network_low_cost" if action_type == "build_ui_data" else "llm_targeted_cost",
+            "confirmation_required": action_type in {"explain_module", "verify_module"},
+            "confirmation_phrase": "RUN",
+            "expected_outputs": ["docs/ui-data/current-state.json"],
+            "warnings": ["test warning"],
+        }
+
+    def run(self, action_type: str, *, modules=None, force: bool = False, confirmed: bool = False, allowed_modules=None) -> dict:
+        if self.next_entry is not None:
+            entry = dict(self.next_entry)
+            self.runs.append(entry)
+            self.actions.insert(0, entry)
+            return entry
+        entry = {
+            "action_id": "action-run",
+            "created_at": "2026-04-28T00:00:00Z",
+            "action_type": action_type,
+            "targets": modules or [],
+            "status": "success",
+            "process_status": "success",
+            "domain_status": "success",
+            "parsed_result_summary": None,
+            "network_call": False,
+            "network_may_be_used": action_type in {"explain_module", "verify_module"},
+            "command": ["python", "-m", "docgen", action_type],
+            "stdout_path": None,
+            "stderr_path": None,
+            "exit_code": 0,
+            "duration_seconds": 0.01,
+            "warnings": ["test warning"],
+            "error": None,
+            "confirmed": confirmed,
+        }
+        self.runs.append(entry)
+        self.actions.insert(0, entry)
+        return entry
+
+    def load_action_log(self) -> dict:
+        return {"schema_version": "1.0", "updated_at": "2026-04-28T00:00:00Z", "actions": self.actions}
 
 
 class UiServerCliTests(unittest.TestCase):
@@ -589,9 +643,16 @@ class UiServerCliTests(unittest.TestCase):
         )
         return generated, enhanced, ui_data
 
-    def start_server(self, generated: Path, enhanced: Path, ui_data: Path) -> tuple[str, object, threading.Thread]:
+    def start_server(
+        self,
+        generated: Path,
+        enhanced: Path,
+        ui_data: Path,
+        *,
+        action_runner: object | None = None,
+    ) -> tuple[str, object, threading.Thread]:
         config = build_server_config(generated, enhanced, ui_data, strict=True)
-        server = create_ui_server(config, host="127.0.0.1", port=0)
+        server = create_ui_server(config, host="127.0.0.1", port=0, action_runner=action_runner)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -641,6 +702,10 @@ class UiServerCliTests(unittest.TestCase):
         problems_by_type = urlopen(base_url + "/problems?type=weak_claim").read().decode("utf-8")
         problems_by_severity = urlopen(base_url + "/problems?severity=warning").read().decode("utf-8")
         search = urlopen(base_url + "/search?q=llm").read().decode("utf-8")
+        actions = urlopen(base_url + "/actions").read().decode("utf-8")
+        build_preview = urlopen(base_url + "/actions/build-ui-data").read().decode("utf-8")
+        explain_preview = urlopen(base_url + "/actions/explain?module=llm").read().decode("utf-8")
+        verify_preview = urlopen(base_url + "/actions/verify?module=llm").read().decode("utf-8")
         file_search = urlopen(base_url + "/search?q=ui_server.py&kind=file").read().decode("utf-8")
         function_search = urlopen(base_url + "/search?q=serve_ui&kind=function").read().decode("utf-8")
         verdict_search = urlopen(base_url + "/search?kind=module&verdict=warning").read().decode("utf-8")
@@ -694,6 +759,15 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Search / Поиск", search)
         self.assertIn("Results count", search)
         self.assertIn("/module/llm", search)
+        self.assertIn("Actions /", actions)
+        self.assertIn("Preview build-ui-data", actions)
+        self.assertIn("mutate local artifacts", actions)
+        self.assertIn("Build UI Data", build_preview)
+        self.assertIn("Planned command", build_preview)
+        self.assertIn("Targeted Explain", explain_preview)
+        self.assertIn("llm_targeted_cost", explain_preview)
+        self.assertIn("Targeted Verify", verify_preview)
+        self.assertIn("Type RUN to confirm", verify_preview)
         self.assertIn("ui_server.py", file_search)
         self.assertIn("serve_ui", function_search)
         self.assertIn("verdict: warning", verdict_search)
@@ -704,6 +778,118 @@ class UiServerCliTests(unittest.TestCase):
         self.assertEqual(current_state["latest_generation_run"]["run_id"], "generation-run")
         self.assertNotIn("https://", home + modules + module + problems + search)
         self.assertNotIn("cdn", (home + modules + module + problems + search).lower())
+
+    def test_actions_post_build_ui_data_uses_allowlisted_runner(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        action_runner = FakeUiActionRunner()
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data, action_runner=action_runner)
+
+        request = Request(
+            base_url + "/actions/build-ui-data",
+            data=b"",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        result = urlopen(request).read().decode("utf-8")
+        action_page = urlopen(base_url + "/actions").read().decode("utf-8")
+
+        self.assertIn("Action result", result)
+        self.assertIn("build_ui_data", result)
+        self.assertEqual(action_runner.runs[0]["action_type"], "build_ui_data")
+        self.assertIn("action-run", action_page)
+
+    def test_explain_preview_warns_and_disables_run_for_skip_module(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        modules_index = json.loads((ui_data / "modules-index.json").read_text(encoding="utf-8"))
+        skip_module = dict(modules_index["modules"][0])
+        skip_module["name"] = "ui_actions"
+        skip_module["explain_mode"] = "skip"
+        modules_index["modules"].append(skip_module)
+        self.write_json(ui_data / "modules-index.json", modules_index)
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        preview = urlopen(base_url + "/actions/explain?module=ui_actions").read().decode("utf-8")
+
+        self.assertIn("explain_mode=skip", preview)
+        self.assertIn("Run action disabled", preview)
+        self.assertIn("--include-skip", preview)
+
+    def test_action_result_renders_domain_no_op_counts_and_network_call(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        action_runner = FakeUiActionRunner()
+        action_runner.next_entry = {
+            "action_id": "skip-action",
+            "created_at": "2026-04-28T00:00:00Z",
+            "action_type": "explain_module",
+            "targets": ["ui_actions"],
+            "status": "no_op",
+            "process_status": "success",
+            "domain_status": "no_op",
+            "network_may_be_used": True,
+            "network_call": False,
+            "command": ["python", "-m", "docgen", "explain-batch", "--only-module", "ui_actions"],
+            "stdout_path": None,
+            "stderr_path": None,
+            "exit_code": 0,
+            "duration_seconds": 0.1,
+            "warnings": [],
+            "error": None,
+            "parsed_result_summary": {
+                "kind": "generation",
+                "selected_modules": [],
+                "total_modules_selected": 0,
+                "generated_count": 0,
+                "skipped_by_plan_count": 1,
+                "skipped_cached_count": 0,
+                "failed_count": 0,
+                "network_call": False,
+                "module_statuses": [
+                    {
+                        "module": "ui_actions",
+                        "status": "skipped_by_plan",
+                        "error": "explain_mode=skip; use --include-skip to include this module.",
+                    }
+                ],
+            },
+        }
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data, action_runner=action_runner)
+
+        request = Request(
+            base_url + "/actions/explain",
+            data=b"module=ui_actions&confirm=RUN",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        result = urlopen(request).read().decode("utf-8")
+
+        self.assertIn("Domain status", result)
+        self.assertIn("no_op", result)
+        self.assertIn("Network call", result)
+        self.assertIn("false", result)
+        self.assertIn("Generated count", result)
+        self.assertIn("Skipped by plan count", result)
+        self.assertIn("skipped_by_plan", result)
+        self.assertIn("UI data rebuild is not required", result)
+
+    def test_expensive_actions_require_confirmation_in_ui_runner(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        request = Request(
+            base_url + "/actions/verify",
+            data=b"module=llm",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        result = urlopen(request).read().decode("utf-8")
+
+        self.assertIn("Action result", result)
+        self.assertIn("rejected", result)
+        self.assertIn("Confirmation phrase", result)
 
     def test_history_and_file_routes_are_served(self) -> None:
         root = self.make_temp_dir()
@@ -849,6 +1035,10 @@ class UiServerCliTests(unittest.TestCase):
         urlopen(base_url + "/search?q=llm").read()
         urlopen(base_url + "/compare").read()
         urlopen(base_url + "/compare/generation?run_a=generation-run-prev&run_b=generation-run").read()
+        urlopen(base_url + "/actions").read()
+        urlopen(base_url + "/actions/build-ui-data").read()
+        urlopen(base_url + "/actions/explain?module=llm").read()
+        urlopen(base_url + "/actions/verify?module=llm").read()
         urlopen(base_url + "/ui-data/current-state.json").read()
 
         after = {path: path.read_text(encoding="utf-8") for path in tracked_files}

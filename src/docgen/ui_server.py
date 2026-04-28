@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from docgen.ui_actions import ActionError, ActionRunner, CONFIRMATION_PHRASE
 from docgen.ui_run_diff import RunDiffError, build_run_diff
 
 REQUIRED_UI_DATA_FILES = {
@@ -57,10 +58,22 @@ class UiNotFound(ValueError):
 
 
 class DocgenUiServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], config: UiServerConfig, data: UiDataBundle):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        config: UiServerConfig,
+        data: UiDataBundle,
+        action_runner: ActionRunner | None = None,
+    ):
         super().__init__(server_address, DocgenUiRequestHandler)
         self.config = config
         self.data = data
+        self.action_runner = action_runner or ActionRunner(
+            project_root=config.project_root,
+            generated_root=config.generated_root,
+            enhanced_root=config.enhanced_root,
+            ui_data_root=config.ui_data_root,
+        )
 
 
 def serve_ui(
@@ -101,8 +114,9 @@ def create_ui_server(
     host: str = "127.0.0.1",
     port: int = 0,
     data: UiDataBundle | None = None,
+    action_runner: ActionRunner | None = None,
 ) -> DocgenUiServer:
-    return DocgenUiServer((host, port), config, data or load_ui_data(config))
+    return DocgenUiServer((host, port), config, data or load_ui_data(config), action_runner=action_runner)
 
 
 def build_server_config(
@@ -190,6 +204,7 @@ def server_summary(
             "/problems",
             "/search",
             "/compare",
+            "/actions",
             "/compare/generation",
             "/compare/verification",
             "/history",
@@ -228,6 +243,40 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
                 self.send_html(render_compare_run("generation", parsed.query, self.server.config, self.server.data))
             elif path == "/compare/verification":
                 self.send_html(render_compare_run("verification", parsed.query, self.server.config, self.server.data))
+            elif path == "/actions":
+                self.send_html(render_actions(self.server.config, self.server.data, self.server.action_runner))
+            elif path == "/actions/build-ui-data":
+                self.send_html(
+                    render_action_preview(
+                        "build_ui_data",
+                        parsed.query,
+                        self.server.config,
+                        self.server.data,
+                        self.server.action_runner,
+                    )
+                )
+            elif path == "/actions/explain":
+                self.send_html(
+                    render_action_preview(
+                        "explain_module",
+                        parsed.query,
+                        self.server.config,
+                        self.server.data,
+                        self.server.action_runner,
+                    )
+                )
+            elif path == "/actions/verify":
+                self.send_html(
+                    render_action_preview(
+                        "verify_module",
+                        parsed.query,
+                        self.server.config,
+                        self.server.data,
+                        self.server.action_runner,
+                    )
+                )
+            elif path.startswith("/actions/runs/"):
+                self.send_html(render_action_run(unquote(path.removeprefix("/actions/runs/")), self.server.config, self.server.data, self.server.action_runner))
             elif path == "/history":
                 self.send_html(render_history(self.server.config, self.server.data))
             elif path.startswith("/history/"):
@@ -248,6 +297,36 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
             self.send_html(render_error(str(exc)), status=HTTPStatus.BAD_REQUEST)
         except OSError as exc:
             self.send_html(render_error(str(exc)), status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        try:
+            form = self.read_form()
+            if path == "/actions/build-ui-data":
+                entry = run_action_from_form("build_ui_data", form, self.server.data, self.server.action_runner)
+                if entry.get("status") == "success":
+                    self.server.data = load_ui_data(self.server.config)
+                self.send_html(render_action_result(entry, self.server.config, self.server.data))
+            elif path == "/actions/explain":
+                entry = run_action_from_form("explain_module", form, self.server.data, self.server.action_runner)
+                self.send_html(render_action_result(entry, self.server.config, self.server.data))
+            elif path == "/actions/verify":
+                entry = run_action_from_form("verify_module", form, self.server.data, self.server.action_runner)
+                self.send_html(render_action_result(entry, self.server.config, self.server.data))
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except UiNotFound as exc:
+            self.send_html(render_error(str(exc)), status=HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            self.send_html(render_error(str(exc)), status=HTTPStatus.BAD_REQUEST)
+        except OSError as exc:
+            self.send_html(render_error(str(exc)), status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def read_form(self) -> dict[str, list[str]]:
+        length = int(self.headers.get("Content-Length") or "0")
+        body = self.rfile.read(length).decode("utf-8", errors="replace") if length else ""
+        return parse_qs(body, keep_blank_values=True)
 
     def send_ui_data_file(self, request_path: str) -> None:
         relative = request_path.removeprefix("/ui-data/").strip("/")
@@ -364,6 +443,7 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
         page_header(str(module.get("name") or "Module"), "Entity-first module view."),
         render_module_summary(module, enhanced, verification),
         render_module_problems_summary(str(module.get("name") or ""), data.problems_index),
+        render_module_action_links(str(module.get("name") or "")),
         '<nav class="section-nav" aria-label="Module sections">',
         '<a href="#overview">Обзор</a>',
         '<a href="#facts">Факты</a>',
@@ -627,6 +707,390 @@ def render_artifact_page(query: str, config: UiServerConfig, data: UiDataBundle)
     return layout("Artifact", "\n".join(content), data)
 
 
+def render_actions(config: UiServerConfig, data: UiDataBundle, runner: ActionRunner) -> str:
+    modules = module_records(data)
+    content = [
+        page_header("Actions / Действия", "Explicit local actions. Read-only pages stay separate from mutations."),
+        '<div class="warning">Actions mutate local artifacts. Expensive LLM actions require preview, explicit module targets, and confirmation.</div>',
+        '<section class="action-grid">',
+        '<div class="panel action-card"><h2>Build UI data</h2>',
+        "<p>Rebuilds docs/ui-data from existing machine-readable artifacts. Network call: false.</p>",
+        '<a class="button" href="/actions/build-ui-data">Preview build-ui-data</a>',
+        "</div>",
+        '<div class="panel action-card"><h2>Targeted explain</h2>',
+        "<p>Runs explain-batch only for selected modules. Network/API cost may occur.</p>",
+        render_action_select_form("/actions/explain", modules, "Preview explain"),
+        "</div>",
+        '<div class="panel action-card"><h2>Targeted verify</h2>',
+        "<p>Runs verify-batch only for selected modules. Network/API cost may occur.</p>",
+        render_action_select_form("/actions/verify", modules, "Preview verify"),
+        "</div>",
+        "</section>",
+        '<section class="panel"><h2>Latest action log</h2>',
+        render_action_log_table(runner.load_action_log()),
+        "</section>",
+    ]
+    return layout("Actions", "\n".join(content), data)
+
+
+def render_action_preview(
+    action_type: str,
+    query: str,
+    config: UiServerConfig,
+    data: UiDataBundle,
+    runner: ActionRunner,
+) -> str:
+    params = parse_qs(query)
+    modules = action_modules_from_params(params)
+    force = checkbox_value(params, "force")
+    modules_required = action_type in {"explain_module", "verify_module"}
+    if modules_required and not modules:
+        content = [
+            page_header(action_title(action_type), "Choose explicit module targets before previewing an LLM action."),
+            '<div class="warning">At least one module is required. Empty module lists and wildcards are rejected.</div>',
+            '<section class="panel">',
+            render_action_select_form(action_route(action_type), module_records(data), "Preview"),
+            "</section>",
+        ]
+        return layout(action_title(action_type), "\n".join(content), data)
+    try:
+        preview = runner.preview(
+            action_type,
+            modules=modules,
+            force=force,
+            allowed_modules=allowed_module_names(data),
+        )
+    except ActionError as exc:
+        raise ValueError(str(exc)) from exc
+    skipped_modules = explain_skip_modules(data, modules) if action_type == "explain_module" else []
+    content = [
+        page_header(action_title(action_type), "Preview / dry-run equivalent before mutation."),
+        render_explain_skip_warning(skipped_modules, preview) if skipped_modules else "",
+        render_action_preview_details(preview),
+        render_action_confirm_form(action_type, modules, force, preview, disabled=bool(skipped_modules)),
+    ]
+    return layout(action_title(action_type), "\n".join(content), data)
+
+
+def render_action_run(action_id: str, config: UiServerConfig, data: UiDataBundle, runner: ActionRunner) -> str:
+    actions = list_value(runner.load_action_log().get("actions"))
+    entry = next((item for item in actions if isinstance(item, dict) and item.get("action_id") == action_id), None)
+    if entry is None:
+        raise UiNotFound(f"Unknown action run: {action_id}")
+    return render_action_result(entry, config, data)
+
+
+def render_action_preview_details(preview: dict[str, Any]) -> str:
+    command = preview.get("command") if isinstance(preview.get("command"), list) else []
+    outputs = preview.get("expected_outputs") if isinstance(preview.get("expected_outputs"), list) else []
+    warnings = preview.get("warnings") if isinstance(preview.get("warnings"), list) else []
+    return (
+        '<section class="panel action-preview"><h2>Preview</h2>'
+        + definition_list(
+            [
+                ("Action type", preview.get("action_type")),
+                ("Targets", ", ".join(str(item) for item in preview.get("targets") or []) or "none"),
+                ("Network may be used", str(bool(preview.get("network_may_be_used"))).lower()),
+                ("Risk class", preview.get("risk_class")),
+                ("Confirmation required", str(bool(preview.get("confirmation_required"))).lower()),
+            ]
+        )
+        + "<h3>Planned command</h3>"
+        + f'<pre class="command">{" ".join(esc(part) for part in command)}</pre>'
+        + "<h3>Expected outputs</h3>"
+        + render_text_list(outputs)
+        + "<h3>Warnings</h3>"
+        + render_text_list(warnings)
+        + "</section>"
+    )
+
+
+def render_action_confirm_form(
+    action_type: str,
+    modules: list[str],
+    force: bool,
+    preview: dict[str, Any],
+    *,
+    disabled: bool = False,
+) -> str:
+    route = action_route(action_type)
+    hidden_modules = "".join(f'<input type="hidden" name="module" value="{esc(module)}">' for module in modules)
+    force_input = '<input type="hidden" name="force" value="true">' if force else ""
+    confirm_field = ""
+    if preview.get("confirmation_required"):
+        confirm_field = (
+            f'<label>Type {CONFIRMATION_PHRASE} to confirm'
+            f'<input name="confirm" autocomplete="off" placeholder="{CONFIRMATION_PHRASE}"></label>'
+        )
+    return (
+        '<section class="panel action-confirm"><h2>Confirmed run</h2>'
+        '<p class="muted">Mutation is only performed by this POST form. GET routes only preview.</p>'
+        f'<form class="search-form" action="{esc(route)}" method="post">'
+        f"{hidden_modules}{force_input}{confirm_field}"
+        + (
+            '<button type="submit" disabled>Run action disabled</button>'
+            if disabled
+            else '<button type="submit">Run action</button>'
+        )
+        + "</form></section>"
+    )
+
+
+def render_action_result(entry: dict[str, Any], config: UiServerConfig, data: UiDataBundle) -> str:
+    status = str(entry.get("status") or "unknown")
+    summary = entry.get("parsed_result_summary") if isinstance(entry.get("parsed_result_summary"), dict) else {}
+    warnings = entry.get("warnings") if isinstance(entry.get("warnings"), list) else []
+    content = [
+        page_header("Action result", str(entry.get("action_id") or "unknown")),
+        '<section class="panel action-result"><h2>Result</h2>',
+        definition_list(
+            [
+                ("Action ID", action_run_link(entry.get("action_id"))),
+                ("Action type", entry.get("action_type")),
+                ("Targets", ", ".join(str(item) for item in entry.get("targets") or []) or "none"),
+                ("Status", status_badge(status)),
+                ("Domain status", status_badge(entry.get("domain_status") or status)),
+                ("Process status", entry.get("process_status")),
+                ("Network may be used", str(bool(entry.get("network_may_be_used"))).lower()),
+                ("Network call", stringify_bool_or_unknown(entry.get("network_call"))),
+                ("Exit code", entry.get("exit_code")),
+                ("Duration seconds", entry.get("duration_seconds")),
+                ("Stdout", artifact_link(entry.get("stdout_path"), "stdout log")),
+                ("Stderr", artifact_link(entry.get("stderr_path"), "stderr log")),
+                ("Error", entry.get("error")),
+            ],
+            raw_labels={"Action ID", "Status", "Domain status", "Stdout", "Stderr"},
+        ),
+        render_action_domain_summary(summary),
+        "<h3>Command</h3>",
+        f'<pre class="command">{" ".join(esc(part) for part in entry.get("command") or [])}</pre>',
+        "<h3>Warnings</h3>",
+        render_text_list(warnings),
+        "</section>",
+        '<section class="panel"><h2>Next steps</h2>',
+        render_action_next_steps(entry),
+        "</section>",
+    ]
+    return layout("Action result", "\n".join(content), data)
+
+
+def render_action_log_table(log: dict[str, Any]) -> str:
+    actions = [item for item in list_value(log.get("actions")) if isinstance(item, dict)]
+    if not actions:
+        return '<p class="muted">No actions have been recorded.</p>'
+    rows = []
+    for entry in actions[:25]:
+        rows.append(
+            "<tr>"
+            f"<td>{action_run_link(entry.get('action_id'))}</td>"
+            f"<td>{esc(entry.get('created_at'))}</td>"
+            f"<td>{esc(entry.get('action_type'))}</td>"
+            f"<td>{esc(', '.join(str(item) for item in entry.get('targets') or []))}</td>"
+            f"<td>{status_badge(entry.get('status'))}</td>"
+            f"<td>{esc(entry.get('domain_status') or entry.get('status'))}</td>"
+            f"<td>{esc(entry.get('exit_code'))}</td>"
+            f"<td>{artifact_link(entry.get('stdout_path'), 'stdout')}<br>{artifact_link(entry.get('stderr_path'), 'stderr')}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table><thead><tr><th>Action</th><th>Created at</th>'
+        "<th>Type</th><th>Targets</th><th>Status</th><th>Domain</th><th>Exit</th><th>Logs</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_action_select_form(route: str, modules: list[dict[str, Any]], button_label: str) -> str:
+    options = "".join(
+        f'<option value="{esc(module.get("name"))}">{esc(module.get("name"))}</option>'
+        for module in modules
+        if module.get("name")
+    )
+    return (
+        f'<form class="search-form action-select-form" action="{esc(route)}" method="get">'
+        f"<label>Module<select name=\"module\">{options}</select></label>"
+        '<label class="checkbox-label"><input type="checkbox" name="force" value="true"> Force</label>'
+        f'<button type="submit">{esc(button_label)}</button>'
+        "</form>"
+    )
+
+
+def render_explain_skip_warning(modules: list[str], preview: dict[str, Any]) -> str:
+    command = [str(part) for part in preview.get("command") or []]
+    manual_command = " ".join(esc(part) for part in [*command, "--include-skip"])
+    return (
+        '<div class="warning action-skip-warning">'
+        "Этот модуль имеет explain_mode=skip. Обычная генерация не будет выполнена, поэтому RUN отключен."
+        f"<br>Modules: {esc(', '.join(modules))}"
+        "<br>Если include-skip нужен сознательно, выполните команду вручную:"
+        f'<pre class="command">{manual_command}</pre>'
+        "</div>"
+    )
+
+
+def render_action_domain_summary(summary: dict[str, Any]) -> str:
+    if not summary:
+        return '<div class="notice muted">No parsed batch result was available in stdout.</div>'
+    rows = [
+        ("Kind", summary.get("kind")),
+        ("Network call", stringify_bool_or_unknown(summary.get("network_call"))),
+        ("Selected modules", ", ".join(str(item) for item in summary.get("selected_modules") or []) or "none"),
+        ("Total modules selected", summary.get("total_modules_selected")),
+        ("Generated count", summary.get("generated_count")),
+        ("Verified count", summary.get("verified_count")),
+        ("Skipped by plan count", summary.get("skipped_by_plan_count")),
+        ("Skipped cached count", summary.get("skipped_cached_count")),
+        ("Skipped missing enhanced count", summary.get("skipped_missing_enhanced_count")),
+        ("Failed count", summary.get("failed_count")),
+    ]
+    module_statuses = summary.get("module_statuses") if isinstance(summary.get("module_statuses"), list) else []
+    return (
+        '<div class="structured-summary action-domain-summary"><h3>Parsed batch result</h3>'
+        + definition_list(rows)
+        + "<h3>Per-module result statuses</h3>"
+        + render_action_module_statuses(module_statuses)
+        + "</div>"
+    )
+
+
+def render_action_module_statuses(module_statuses: list[Any]) -> str:
+    if not module_statuses:
+        return '<p class="muted">No per-module result statuses.</p>'
+    rows = []
+    for item in module_statuses:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            "<tr>"
+            f"<td>{module_name_link(item.get('module'))}</td>"
+            f"<td>{status_badge(item.get('status'))}</td>"
+            f"<td>{esc(item.get('error'))}</td>"
+            "</tr>"
+        )
+    if not rows:
+        return '<p class="muted">No per-module result statuses.</p>'
+    return (
+        '<div class="table-wrap"><table><thead><tr><th>Module</th><th>Status</th><th>Error</th></tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_action_next_steps(entry: dict[str, Any]) -> str:
+    summary = entry.get("parsed_result_summary") if isinstance(entry.get("parsed_result_summary"), dict) else {}
+    changed_count = int_value(summary.get("generated_count")) + int_value(summary.get("verified_count"))
+    links = ['<a class="button" href="/actions">Actions</a>', '<a class="button" href="/modules">Modules</a>', '<a class="button" href="/history">History</a>']
+    if entry.get("domain_status") == "success" and changed_count > 0:
+        links.append('<a class="button" href="/actions/build-ui-data">Rebuild UI data</a>')
+        note = '<p class="notice">This action produced generation/verification output. Rebuild UI data to refresh the inspector.</p>'
+    elif entry.get("domain_status") == "no_op":
+        note = '<p class="notice muted">This action was a no-op/skipped result. UI data rebuild is not required.</p>'
+    else:
+        note = ""
+    return note + '<div class="quick-links">' + "".join(links) + "</div>"
+
+
+def render_module_action_links(module_name: str) -> str:
+    encoded = quote(module_name, safe="")
+    return (
+        '<section class="panel actions-entry"><h2>Actions</h2>'
+        '<p class="muted">These links open preview forms. They do not run expensive actions immediately.</p>'
+        '<div class="quick-links">'
+        f'<a class="button" href="/actions/explain?module={encoded}">Re-explain this module</a>'
+        f'<a class="button" href="/actions/verify?module={encoded}">Re-verify this module</a>'
+        "</div></section>"
+    )
+
+
+def run_action_from_form(
+    action_type: str,
+    form: dict[str, list[str]],
+    data: UiDataBundle,
+    runner: ActionRunner,
+) -> dict[str, Any]:
+    modules = action_modules_from_params(form)
+    force = checkbox_value(form, "force")
+    confirmed = action_type == "build_ui_data" or first_query_value(form, "confirm") == CONFIRMATION_PHRASE
+    return runner.run(
+        action_type,
+        modules=modules,
+        force=force,
+        confirmed=confirmed,
+        allowed_modules=allowed_module_names(data),
+    )
+
+
+def action_modules_from_params(params: dict[str, list[str]]) -> list[str]:
+    values = []
+    values.extend(params.get("module") or [])
+    values.extend(params.get("modules") or [])
+    seen: set[str] = set()
+    modules: list[str] = []
+    for value in values:
+        module = str(value or "").strip()
+        if module and module not in seen:
+            modules.append(module)
+            seen.add(module)
+    return modules
+
+
+def allowed_module_names(data: UiDataBundle) -> set[str]:
+    return {str(module.get("name")) for module in module_records(data) if module.get("name")}
+
+
+def explain_skip_modules(data: UiDataBundle, modules: list[str]) -> list[str]:
+    selected = set(modules)
+    skipped = []
+    for module in module_records(data):
+        name = str(module.get("name") or "")
+        if name in selected and module.get("explain_mode") == "skip":
+            skipped.append(name)
+    return skipped
+
+
+def checkbox_value(params: dict[str, list[str]], key: str) -> bool:
+    value = first_query_value(params, key)
+    return str(value or "").lower() in {"1", "true", "on", "yes"}
+
+
+def action_route(action_type: str) -> str:
+    if action_type == "build_ui_data":
+        return "/actions/build-ui-data"
+    if action_type == "explain_module":
+        return "/actions/explain"
+    if action_type == "verify_module":
+        return "/actions/verify"
+    return "/actions"
+
+
+def action_title(action_type: str) -> str:
+    if action_type == "build_ui_data":
+        return "Build UI Data"
+    if action_type == "explain_module":
+        return "Targeted Explain"
+    if action_type == "verify_module":
+        return "Targeted Verify"
+    return "Action"
+
+
+def action_run_link(action_id: Any) -> str:
+    if not action_id:
+        return '<span class="muted">no data</span>'
+    return f'<a href="/actions/runs/{quote(str(action_id), safe="")}">{esc(action_id)}</a>'
+
+
+def render_text_list(values: list[Any]) -> str:
+    if not values:
+        return '<p class="muted">none</p>'
+    return "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in values) + "</ul>"
+
+
+def stringify_bool_or_unknown(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if value in (None, ""):
+        return "unknown"
+    return str(value)
+
+
 def layout(title: str, content: str, data: UiDataBundle) -> str:
     warnings = data.warnings
     warning_html = ""
@@ -642,7 +1106,7 @@ def layout(title: str, content: str, data: UiDataBundle) -> str:
         '<form class="global-search" action="/search" method="get">'
         '<input name="q" type="search" placeholder="Search modules, files, functions" aria-label="Search">'
         '<button type="submit">Search</button></form>'
-        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/problems">Problems</a><a href="/search">Search</a><a href="/compare">Compare</a><a href="/history">History</a>'
+        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/problems">Problems</a><a href="/search">Search</a><a href="/compare">Compare</a><a href="/history">History</a><a href="/actions">Actions</a>'
         '<a href="/ui-data/current-state.json">current-state.json</a></nav></header>'
         f"<main>{warning_html}{content}</main>"
         "</body></html>"
@@ -1453,7 +1917,7 @@ def module_name_link(name: Any) -> str:
 def status_badge(status: Any) -> str:
     text = str(status or "unknown")
     css = "fail" if text == "fail" or "failed" in text or text.endswith("_fail") else "warn" if text == "warning" or "warning" in text else "ok"
-    if text in {"unknown", "missing", "info", "skipped_missing_enhanced"}:
+    if text in {"unknown", "missing", "info", "skipped", "no_op", "skipped_cached", "skipped_missing_enhanced"}:
         css = "neutral"
     return f'<span class="badge {css}">{esc(text)}</span>'
 
@@ -1659,11 +2123,12 @@ a:hover { text-decoration: underline; }
   gap: 6px;
   min-width: min(360px, 100%);
 }
-.global-search input, .search-form input {
+.global-search input, .search-form input, .search-form select {
   width: 100%;
   padding: 7px 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
+  background: #fff;
 }
 .global-search button, .search-form button {
   padding: 7px 10px;
@@ -1710,6 +2175,27 @@ main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
   gap: 4px;
   color: var(--muted);
   font-size: 12px;
+}
+.search-form .checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.search-form .checkbox-label input { width: auto; }
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.action-card p { min-height: 42px; }
+.command {
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .search-result {
   padding: 12px 0;
