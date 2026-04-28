@@ -6,6 +6,7 @@ src/docgen/analyzer.py
 src/docgen/cli.py
 src/docgen/renderer.py
 src/docgen/ui_data.py
+src/docgen/ui_server.py
 src/docgen.egg-info/PKG-INFO
 src/docgen.egg-info/SOURCES.txt
 src/docgen.egg-info/dependency_links.txt
@@ -33,4 +34,5 @@ tests/test_module_verifier_cli.py
 tests/test_renderer_cli.py
 tests/test_run_history.py
 tests/test_ui_data_cli.py
+tests/test_ui_server_cli.py
 tests/test_verify_batch_cli.py

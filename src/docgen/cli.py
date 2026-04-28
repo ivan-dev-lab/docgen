@@ -15,6 +15,7 @@ from .llm.module_verifier import DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS, verify_
 from .llm.openrouter_provider import OpenRouterProvider
 from .renderer import render_project
 from .ui_data import build_ui_data
+from .ui_server import serve_ui
 
 
 def parse_cli_bool(value: str | bool) -> bool:
@@ -571,6 +572,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build and print a summary without writing UI data files.",
     )
     ui_data_parser.set_defaults(handler=run_build_ui_data)
+
+    serve_ui_parser = subparsers.add_parser(
+        "serve-ui",
+        help="Serve the read-only local UI for generated docgen artifacts.",
+    )
+    serve_ui_parser.add_argument(
+        "--generated",
+        dest="generated_root",
+        required=True,
+        help="Root directory containing generated factual artifacts.",
+    )
+    serve_ui_parser.add_argument(
+        "--enhanced",
+        dest="enhanced_root",
+        required=True,
+        help="Root directory containing enhanced artifacts.",
+    )
+    serve_ui_parser.add_argument(
+        "--ui-data",
+        dest="ui_data_root",
+        required=True,
+        help="Root directory containing UI data contract JSON files.",
+    )
+    serve_ui_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the local UI. Default: 127.0.0.1.",
+    )
+    serve_ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for the local UI. Default: 8000.",
+    )
+    serve_ui_parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the UI in a browser after the server starts.",
+    )
+    serve_ui_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail when required UI data files are missing or invalid.",
+    )
+    serve_ui_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate UI data and print a summary without starting the server.",
+    )
+    serve_ui_parser.set_defaults(handler=run_serve_ui)
     return parser
 
 
@@ -774,6 +825,22 @@ def run_build_ui_data(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_serve_ui(args: argparse.Namespace) -> int:
+    summary = serve_ui(
+        Path(args.generated_root).expanduser(),
+        Path(args.enhanced_root).expanduser(),
+        Path(args.ui_data_root).expanduser(),
+        host=args.host,
+        port=args.port,
+        open_browser=args.open_browser,
+        strict=args.strict,
+        dry_run=args.dry_run,
+    )
+    if args.dry_run:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
