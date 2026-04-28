@@ -9,6 +9,7 @@ SCHEMA_VERSION = "1.0"
 CURRENT_STATE_FILENAME = "current-state.json"
 MODULES_INDEX_FILENAME = "modules-index.json"
 HISTORY_INDEX_FILENAME = "history-index.json"
+HISTORY_RUNS_FILENAME = "history-runs.json"
 UI_DATA_MANIFEST_FILENAME = "ui-data-manifest.json"
 
 
@@ -68,6 +69,14 @@ def build_ui_data(
         generated_at,
         warnings,
     )
+    history_runs = build_history_runs(
+        enhanced_root=enhanced_root,
+        history_index=history_index,
+        generation_current=generation_current if isinstance(generation_current, dict) else {},
+        verification_current=verification_current if isinstance(verification_current, dict) else {},
+        generated_at=generated_at,
+        warnings=warnings,
+    )
     current_state = build_current_state(
         sources=sources,
         generated_at=generated_at,
@@ -88,6 +97,7 @@ def build_ui_data(
         "current_state": current_state,
         "modules_index": modules,
         "history_index": history_index,
+        "history_runs": history_runs,
         "ui_data_manifest": ui_manifest,
     }
     if not dry_run:
@@ -308,10 +318,202 @@ def build_ui_data_manifest(
             "current_state": normalize_path(output_root / CURRENT_STATE_FILENAME),
             "modules_index": normalize_path(output_root / MODULES_INDEX_FILENAME),
             "history_index": normalize_path(output_root / HISTORY_INDEX_FILENAME),
+            "history_runs": normalize_path(output_root / HISTORY_RUNS_FILENAME),
         },
         "sources": {name: normalize_path(path) for name, path in sources.items()},
         "warnings": warnings,
     }
+
+
+def build_history_runs(
+    *,
+    enhanced_root: Path,
+    history_index: dict[str, Any],
+    generation_current: dict[str, Any],
+    verification_current: dict[str, Any],
+    generated_at: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    generation_runs = [
+        build_history_run_detail("generation", run, enhanced_root, generation_current, warnings)
+        for run in history_index.get("generation_runs", [])
+        if isinstance(run, dict)
+    ]
+    verification_runs = [
+        build_history_run_detail("verification", run, enhanced_root, verification_current, warnings)
+        for run in history_index.get("verification_runs", [])
+        if isinstance(run, dict)
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "generation_runs": generation_runs,
+        "verification_runs": verification_runs,
+        "warnings": warnings,
+    }
+
+
+def build_history_run_detail(
+    kind: str,
+    index_run: dict[str, Any],
+    enhanced_root: Path,
+    current_manifest: dict[str, Any],
+    warnings: list[str],
+) -> dict[str, Any]:
+    manifest_path = index_run.get("manifest_path")
+    manifest = load_history_manifest(manifest_path, enhanced_root, kind, index_run.get("run_id"), warnings)
+    selected_modules = list_value(manifest.get("selected_modules")) or list_value(index_run.get("selected_modules"))
+    results = normalize_history_results(kind, manifest.get("results"))
+    run = {
+        "run_id": index_run.get("run_id"),
+        "kind": kind,
+        "generated_at": manifest.get("generated_at") or index_run.get("generated_at"),
+        "manifest_path": normalize_optional_path(manifest_path),
+        "dry_run": bool(manifest.get("dry_run", index_run.get("dry_run"))),
+        "provider": manifest.get("provider") or index_run.get("provider"),
+        "model": manifest.get("model") or index_run.get("model"),
+        "selected_modules": selected_modules,
+        "selected_modules_count": len(selected_modules),
+        "usage_totals": usage_totals(manifest if manifest else index_run),
+        "estimated_input_tokens_total": int_value(manifest.get("estimated_input_tokens_total")),
+        "latest_live_run": bool(index_run.get("run_id") and index_run.get("run_id") == current_manifest.get("run_id")),
+        "cache_hit_rate": history_cache_hit_rate(manifest, index_run, len(results)),
+        "result_status_counts": count_result_statuses(results),
+        "results": results,
+        "warnings": list_value(manifest.get("warnings")),
+    }
+    if kind == "generation":
+        run.update(
+            {
+                "generated_count": int_value(manifest.get("generated_count", index_run.get("generated_count"))),
+                "skipped_cached_count": int_value(
+                    manifest.get("skipped_cached_count", index_run.get("skipped_cached_count"))
+                ),
+                "skipped_by_plan_count": int_value(
+                    manifest.get("skipped_by_plan_count", index_run.get("skipped_by_plan_count"))
+                ),
+                "failed_count": int_value(manifest.get("failed_count", index_run.get("failed_count"))),
+            }
+        )
+    else:
+        run.update(
+            {
+                "verification_mode": manifest.get("verification_mode") or index_run.get("verification_mode"),
+                "verified_count": int_value(manifest.get("verified_count", index_run.get("verified_count"))),
+                "warning_count": int_value(manifest.get("warning_count", index_run.get("warning_count"))),
+                "failed_count": int_value(manifest.get("failed_count", index_run.get("failed_count"))),
+                "skipped_cached_count": int_value(
+                    manifest.get("skipped_cached_count", index_run.get("skipped_cached_count"))
+                ),
+                "skipped_missing_enhanced_count": int_value(
+                    manifest.get("skipped_missing_enhanced_count", index_run.get("skipped_missing_enhanced_count"))
+                ),
+            }
+        )
+    return run
+
+
+def load_history_manifest(
+    manifest_path: Any,
+    enhanced_root: Path,
+    kind: str,
+    run_id: Any,
+    warnings: list[str],
+) -> dict[str, Any]:
+    if not manifest_path:
+        warnings.append(f"History {kind} run has no manifest_path: {run_id}")
+        return {}
+    path = resolve_recorded_path(manifest_path, enhanced_root)
+    payload = load_json(path)
+    if payload is None:
+        warnings.append(f"Missing or invalid history manifest for {kind} run {run_id}: {normalize_path(path)}")
+        return {}
+    return payload
+
+
+def normalize_history_results(kind: str, results: Any) -> list[dict[str, Any]]:
+    normalized = []
+    for result in results if isinstance(results, list) else []:
+        if not isinstance(result, dict):
+            continue
+        if kind == "generation":
+            normalized.append(normalize_generation_result(result))
+        else:
+            normalized.append(normalize_verification_result(result))
+    return sorted(normalized, key=lambda item: str(item.get("module") or ""))
+
+
+def normalize_generation_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "module": result.get("module"),
+        "status": result.get("status"),
+        "priority": result.get("priority"),
+        "explain_mode": result.get("explain_mode"),
+        "cache_hit": bool(result.get("cache_hit")),
+        "usage": normalize_usage(result.get("usage")),
+        "duration_seconds": number_or_none(result.get("duration_seconds")),
+        "error": result.get("error"),
+        "output_path": normalize_optional_path(result.get("output_path")),
+        "metadata_path": normalize_optional_path(result.get("metadata_path")),
+        "context_fingerprint": result.get("context_fingerprint"),
+    }
+
+
+def normalize_verification_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "module": result.get("module"),
+        "status": result.get("status"),
+        "verifier_status": result.get("verifier_status"),
+        "structured_output_valid": result.get("structured_output_valid"),
+        "verdict": result.get("verdict"),
+        "cache_hit": bool(result.get("cache_hit")),
+        "usage": normalize_usage(result.get("usage")),
+        "duration_seconds": number_or_none(result.get("duration_seconds")),
+        "error": result.get("error"),
+        "enhanced_markdown_path": normalize_optional_path(result.get("enhanced_markdown_path")),
+        "verification_json_path": normalize_optional_path(result.get("verification_json_path")),
+        "verification_summary_path": normalize_optional_path(result.get("verification_summary_path")),
+        "context_fingerprint": result.get("context_fingerprint"),
+    }
+
+
+def normalize_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "prompt_tokens": int_value(value.get("prompt_tokens")),
+        "completion_tokens": int_value(value.get("completion_tokens")),
+        "total_tokens": int_value(value.get("total_tokens")),
+    }
+
+
+def number_or_none(value: Any) -> float | int | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def count_result_statuses(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        status = str(result.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def history_cache_hit_rate(manifest: dict[str, Any], index_run: dict[str, Any], result_count: int) -> float | None:
+    selected_count = int_value(manifest.get("total_modules_selected", index_run.get("selected_modules_count")))
+    if selected_count <= 0:
+        selected_count = len(list_value(manifest.get("selected_modules"))) or len(list_value(index_run.get("selected_modules")))
+    if selected_count <= 0:
+        selected_count = result_count
+    if selected_count <= 0:
+        return None
+    return round(int_value(manifest.get("skipped_cached_count", index_run.get("skipped_cached_count"))) / selected_count, 4)
 
 
 def latest_generation_run(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -646,6 +848,7 @@ def write_outputs(output_root: Path, outputs: dict[str, dict[str, Any]]) -> None
     write_json(output_root / CURRENT_STATE_FILENAME, outputs["current_state"])
     write_json(output_root / MODULES_INDEX_FILENAME, outputs["modules_index"])
     write_json(output_root / HISTORY_INDEX_FILENAME, outputs["history_index"])
+    write_json(output_root / HISTORY_RUNS_FILENAME, outputs["history_runs"])
     write_json(output_root / UI_DATA_MANIFEST_FILENAME, outputs["ui_data_manifest"])
 
 

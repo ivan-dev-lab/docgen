@@ -15,6 +15,7 @@ REQUIRED_UI_DATA_FILES = {
     "current_state": "current-state.json",
     "modules_index": "modules-index.json",
     "history_index": "history-index.json",
+    "history_runs": "history-runs.json",
     "ui_data_manifest": "ui-data-manifest.json",
 }
 DISPLAY_TEXT_LIMIT = 200_000
@@ -34,8 +35,13 @@ class UiDataBundle:
     current_state: dict[str, Any]
     modules_index: dict[str, Any]
     history_index: dict[str, Any]
+    history_runs: dict[str, Any]
     ui_data_manifest: dict[str, Any]
     warnings: list[str]
+
+
+class UiNotFound(ValueError):
+    pass
 
 
 class DocgenUiServer(ThreadingHTTPServer):
@@ -130,6 +136,7 @@ def load_ui_data(config: UiServerConfig) -> UiDataBundle:
         current_state=payloads["current_state"],
         modules_index=payloads["modules_index"],
         history_index=payloads["history_index"],
+        history_runs=payloads["history_runs"],
         ui_data_manifest=payloads["ui_data_manifest"],
         warnings=warnings,
     )
@@ -153,7 +160,15 @@ def server_summary(
         "enhanced_root": normalize_path(config.enhanced_root, config.project_root),
         "ui_data_root": normalize_path(config.ui_data_root, config.project_root),
         "module_count": len(modules),
-        "routes": ["/", "/modules", "/module/{name}", "/history", "/ui-data/current-state.json"],
+        "routes": [
+            "/",
+            "/modules",
+            "/module/{name}",
+            "/history",
+            "/history/generation/{run_id}",
+            "/history/verification/{run_id}",
+            "/ui-data/current-state.json",
+        ],
         "warnings": data.warnings,
         "network_call": False,
     }
@@ -189,6 +204,8 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
                 self.send_bytes(STYLE_CSS.encode("utf-8"), "text/css; charset=utf-8")
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except UiNotFound as exc:
+            self.send_html(render_error(str(exc)), status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self.send_html(render_error(str(exc)), status=HTTPStatus.BAD_REQUEST)
         except OSError as exc:
@@ -230,18 +247,25 @@ def render_home(config: UiServerConfig, data: UiDataBundle) -> str:
     generation = state.get("latest_generation_run") if isinstance(state.get("latest_generation_run"), dict) else {}
     verification = state.get("latest_verification_run") if isinstance(state.get("latest_verification_run"), dict) else {}
     modules = module_records(data)
-    problem_modules = [
-        module
-        for module in modules
-        if not nested_bool(module, "enhanced", "present")
-        or not nested_bool(module, "verification", "present")
-        or nested_text(module, "verification", "verdict") in {"warning", "fail"}
+    warning_or_failed_modules = [
+        module for module in modules if nested_text(module, "verification", "verdict") in {"warning", "fail"}
     ]
+    missing_enhanced_modules = [module for module in modules if not nested_bool(module, "enhanced", "present")]
+    missing_verification_modules = [module for module in modules if not nested_bool(module, "verification", "present")]
     content = [
-        page_header("Project Inspector", "Read-only local view of generated documentation artifacts."),
+        page_header("Project Inspector", "Operational read-only view of project documentation entities."),
+        '<section class="panel home-overview"><h2>Current operational state</h2>',
+        '<div class="quick-links">',
+        '<a class="button" href="/modules">All modules</a>',
+        '<a class="button" href="/history">Run history</a>',
+        '<a class="button" href="#warning-modules">Warning or failed modules</a>',
+        '<a class="button" href="#missing-enhanced">Missing enhanced</a>',
+        '<a class="button" href="#missing-verification">Missing verification</a>',
+        "</div>",
+        "</section>",
         '<section class="metrics">',
-        metric("Latest generation run", generation.get("run_id") or "нет данных"),
-        metric("Latest verification run", verification.get("run_id") or "нет данных"),
+        metric("Latest generation run", generation.get("run_id") or "no data"),
+        metric("Latest verification run", verification.get("run_id") or "no data"),
         metric("Modules", counts.get("total_modules", 0)),
         metric("Verification pass", counts.get("verification_pass", 0)),
         metric("Verification warning", counts.get("verification_warning", 0)),
@@ -249,13 +273,13 @@ def render_home(config: UiServerConfig, data: UiDataBundle) -> str:
         metric("Missing enhanced", counts.get("missing_enhanced", 0)),
         metric("Missing verification", counts.get("missing_verification", 0)),
         "</section>",
-        '<section class="panel"><h2>Problem Modules</h2>',
-        render_module_link_list(problem_modules),
-        "</section>",
-        '<section class="panel"><h2>History</h2>',
-        f'<p><a class="button" href="/history">Open history</a></p>',
+        render_home_module_section("Warning or failed modules", "warning-modules", warning_or_failed_modules),
+        render_home_module_section("Modules missing enhanced explanation", "missing-enhanced", missing_enhanced_modules),
+        render_home_module_section("Modules missing verification", "missing-verification", missing_verification_modules),
+        '<section class="panel"><h2>Latest live runs</h2>',
         render_run_line("Generation", generation),
         render_run_line("Verification", verification),
+        '<p class="muted">History entries are immutable records. The home page shows only the latest live state.</p>',
         "</section>",
     ]
     return layout("Home", "\n".join(content), data)
@@ -297,8 +321,17 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
     verification = module.get("verification") if isinstance(module.get("verification"), dict) else {}
     links = module.get("links") if isinstance(module.get("links"), dict) else {}
     content = [
-        page_header(str(module.get("name") or "Module"), "Module detail"),
-        '<section class="panel"><h2>Metadata</h2>',
+        page_header(str(module.get("name") or "Module"), "Entity-first module view."),
+        render_module_summary(module, enhanced, verification),
+        '<nav class="section-nav" aria-label="Module sections">',
+        '<a href="#overview">Обзор</a>',
+        '<a href="#facts">Факты</a>',
+        '<a href="#enhanced">ИИ-объяснение</a>',
+        '<a href="#verification">Проверка</a>',
+        '<a href="#related-files">Связанные файлы</a>',
+        '<a href="#history">История</a>',
+        "</nav>",
+        '<section id="overview" class="panel"><h2>Обзор / Summary</h2>',
         definition_list(
             [
                 ("Name", module.get("name")),
@@ -307,10 +340,12 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
                 ("Explain mode", module.get("explain_mode")),
                 ("Priority", module.get("priority")),
                 ("Status", module_status(module)),
+                ("Enhanced", "present" if enhanced.get("present") else "missing"),
+                ("Verification", verification.get("verification_status") or "missing"),
             ]
         ),
         "</section>",
-        '<section class="panel layer factual"><h2>Factual</h2>',
+        '<section id="facts" class="panel layer factual"><h2>Факты / Factual layer</h2>',
         definition_list(
             [
                 ("Present", "yes" if factual.get("present") else "no"),
@@ -318,38 +353,45 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
             ],
             raw_labels={"Module doc"},
         ),
-        render_file_links(factual.get("file_doc_paths")),
         render_artifact_text("Factual markdown", factual.get("module_doc_path"), config),
         "</section>",
-        '<section class="panel layer enhanced"><h2>Enhanced</h2>',
+        '<section id="enhanced" class="panel layer enhanced"><h2>ИИ-объяснение / Enhanced explanation</h2>',
+        render_layer_presence("Enhanced explanation", enhanced.get("present")),
         definition_list(
             [
-                ("Present", "yes" if enhanced.get("present") else "no"),
                 ("Generation status", enhanced.get("generation_status")),
                 ("Generation run", history_link("generation", enhanced.get("generation_run_id"), enhanced.get("generation_run_id"))),
-                ("Metadata path", artifact_link(enhanced.get("metadata_path"), "Open metadata")),
+                ("Metadata", artifact_link(enhanced.get("metadata_path"), "Open generation metadata")),
+                ("Raw artifact", artifact_link(enhanced.get("markdown_path"), "Open raw enhanced artifact")),
             ],
-            raw_labels={"Generation run", "Metadata path"},
+            raw_labels={"Generation run", "Metadata", "Raw artifact"},
         ),
-        render_artifact_text("Enhanced markdown", enhanced.get("markdown_path"), config),
+        render_artifact_text("Enhanced explanation content", enhanced.get("markdown_path"), config)
+        if enhanced.get("present")
+        else '<p class="empty-state">Enhanced explanation is missing for this module.</p>',
         "</section>",
-        '<section class="panel layer verification"><h2>Verification</h2>',
+        '<section id="verification" class="panel layer verification"><h2>Проверка / Verification</h2>',
+        render_verification_structured_summary(verification),
         definition_list(
             [
                 ("Present", "yes" if verification.get("present") else "no"),
                 ("Verification status", verification.get("verification_status")),
                 ("Verifier status", verification.get("verifier_status")),
-                ("Verdict", verification.get("verdict")),
-                ("Issues", issue_counts(verification)),
                 ("Verification run", history_link("verification", verification.get("verification_run_id"), verification.get("verification_run_id"))),
                 ("Report JSON", artifact_link(verification.get("json_path"), "Open JSON")),
-                ("Summary", artifact_link(verification.get("summary_path"), "Open summary")),
+                ("Summary artifact", artifact_link(verification.get("summary_path"), "Open summary artifact")),
             ],
-            raw_labels={"Issues", "Verification run", "Report JSON", "Summary"},
+            raw_labels={"Verification run", "Report JSON", "Summary artifact"},
         ),
-        render_artifact_text("Verification summary", verification.get("summary_path"), config),
+        render_artifact_text("Verification markdown summary", verification.get("summary_path"), config)
+        if verification.get("present")
+        else '<p class="empty-state">Verification is missing for this module.</p>',
         "</section>",
-        '<section class="panel"><h2>Navigation</h2>',
+        '<section id="related-files" class="panel"><h2>Связанные файлы / Related files</h2>',
+        render_source_files(factual.get("source_files")),
+        render_file_links(factual.get("file_doc_paths")),
+        "</section>",
+        '<section id="history" class="panel"><h2>История / History</h2>',
         render_history_links(links),
         "</section>",
     ]
@@ -357,16 +399,15 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
 
 
 def render_history(config: UiServerConfig, data: UiDataBundle) -> str:
-    history = data.history_index
-    generation_runs = history.get("generation_runs") if isinstance(history.get("generation_runs"), list) else []
-    verification_runs = history.get("verification_runs") if isinstance(history.get("verification_runs"), list) else []
+    generation_runs = detailed_history_runs(data, "generation")
+    verification_runs = detailed_history_runs(data, "verification")
     content = [
-        page_header("History", "Run entry points"),
-        '<section class="panel"><h2>Generation Runs</h2>',
-        render_history_table("generation", generation_runs),
+        page_header("History", "Immutable run records. Current live state is shown separately on the home page."),
+        '<section class="panel history-kind"><h2>Generation Runs</h2>',
+        render_history_table_v2("generation", generation_runs),
         "</section>",
-        '<section class="panel"><h2>Verification Runs</h2>',
-        render_history_table("verification", verification_runs),
+        '<section class="panel history-kind"><h2>Verification Runs</h2>',
+        render_history_table_v2("verification", verification_runs),
         "</section>",
     ]
     return layout("History", "\n".join(content), data)
@@ -378,30 +419,15 @@ def render_history_run(path: str, config: UiServerConfig, data: UiDataBundle) ->
         raise ValueError("Invalid history route.")
     kind = parts[1]
     run_id = parts[2]
-    runs_key = "generation_runs" if kind == "generation" else "verification_runs"
-    runs = data.history_index.get(runs_key) if isinstance(data.history_index.get(runs_key), list) else []
+    runs = detailed_history_runs(data, kind)
     run = next((item for item in runs if isinstance(item, dict) and item.get("run_id") == run_id), None)
     if run is None:
-        raise ValueError(f"Unknown {kind} run: {run_id}")
-    selected = [module for name in run.get("selected_modules") or [] for module in [find_module(data, str(name))] if module]
+        raise UiNotFound(f"Unknown {kind} run: {run_id}")
     content = [
-        page_header(f"{kind.title()} Run", str(run_id)),
-        '<section class="panel"><h2>Summary</h2>',
-        definition_list(
-            [
-                ("Run ID", run.get("run_id")),
-                ("Generated at", run.get("generated_at")),
-                ("Provider", run.get("provider")),
-                ("Model", run.get("model")),
-                ("Manifest", artifact_link(run.get("manifest_path"), "Open manifest")),
-                ("Usage", json.dumps(run.get("usage_totals") or {}, ensure_ascii=False, sort_keys=True)),
-            ],
-            raw_labels={"Manifest"},
-        ),
-        "</section>",
-        '<section class="panel"><h2>Selected Modules</h2>',
-        render_module_link_list(selected),
-        "</section>",
+        page_header(f"{kind.title()} Run", f"Immutable history record: {run_id}"),
+        render_current_history_notice(run),
+        render_history_run_summary(kind, run),
+        render_history_results(kind, run, data),
     ]
     return layout(f"{kind.title()} Run", "\n".join(content), data)
 
@@ -488,6 +514,88 @@ def render_module_link_list(modules: list[dict[str, Any]]) -> str:
     return '<ul class="link-list">' + "".join(f"<li>{module_link(module)}</li>" for module in modules) + "</ul>"
 
 
+def render_home_module_section(title: str, anchor: str, modules: list[dict[str, Any]]) -> str:
+    if not modules:
+        body = '<p class="muted">no modules</p>'
+    else:
+        rows = []
+        for module in modules:
+            verification = module.get("verification") if isinstance(module.get("verification"), dict) else {}
+            enhanced = module.get("enhanced") if isinstance(module.get("enhanced"), dict) else {}
+            rows.append(
+                "<tr>"
+                f"<td>{module_link(module)}</td>"
+                f"<td>{presence(enhanced.get('present'))}</td>"
+                f"<td>{verdict_badge(verification.get('verdict'), verification.get('verification_status'))}</td>"
+                f"<td>{issue_counts(verification)}</td>"
+                "</tr>"
+            )
+        body = (
+            '<div class="table-wrap"><table>'
+            "<thead><tr><th>Module</th><th>Enhanced</th><th>Verification</th><th>Issues</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+        )
+    return f'<section id="{esc(anchor)}" class="panel"><h2>{esc(title)}</h2>{body}</section>'
+
+
+def render_module_summary(module: dict[str, Any], enhanced: dict[str, Any], verification: dict[str, Any]) -> str:
+    return (
+        '<section class="panel module-summary"><div class="summary-heading">'
+        f"<div><h2>Module Summary</h2><p>{esc(module_status(module))}</p></div>"
+        f"<div>{verdict_badge(verification.get('verdict'), verification.get('verification_status'))}</div>"
+        "</div>"
+        '<div class="summary-grid">'
+        + summary_item("Type", module.get("type"))
+        + summary_item("Role", module.get("module_page_role"))
+        + summary_item("Explain mode", module.get("explain_mode"))
+        + summary_item("Priority", module.get("priority"))
+        + summary_item("Enhanced", "present" if enhanced.get("present") else "missing")
+        + summary_item("Generation status", enhanced.get("generation_status"))
+        + summary_item("Verification", "present" if verification.get("present") else "missing")
+        + summary_item("Verifier status", verification.get("verifier_status"))
+        + summary_item("Weak claims", int_value(verification.get("weak_claims_count")))
+        + summary_item("Unsupported claims", int_value(verification.get("unsupported_claims_count")))
+        + summary_item("Missing uncertainty", int_value(verification.get("missing_uncertainty_count")))
+        + summary_item("Missing factual support", int_value(verification.get("missing_factual_support_count")))
+        + summary_item("Generation run", enhanced.get("generation_run_id"))
+        + summary_item("Verification run", verification.get("verification_run_id"))
+        + "</div></section>"
+    )
+
+
+def summary_item(label: str, value: Any) -> str:
+    return f'<div class="summary-item"><span>{esc(label)}</span><strong>{esc(value if value not in (None, "") else "no data")}</strong></div>'
+
+
+def render_layer_presence(label: str, present: Any) -> str:
+    state = "present" if present else "missing"
+    return f'<p class="layer-state"><strong>{esc(label)}:</strong> {presence(bool(present))} <span class="muted">{esc(state)}</span></p>'
+
+
+def render_verification_structured_summary(verification: dict[str, Any]) -> str:
+    return (
+        '<div class="structured-summary verification-structured-summary">'
+        "<h3>Structured verification summary</h3>"
+        '<div class="summary-grid compact">'
+        + summary_item("Verdict", verification.get("verdict") or "missing")
+        + summary_item("Verifier status", verification.get("verifier_status"))
+        + summary_item("Structured output valid", str(bool(verification.get("structured_output_valid"))).lower())
+        + summary_item("Weak claims", int_value(verification.get("weak_claims_count")))
+        + summary_item("Unsupported claims", int_value(verification.get("unsupported_claims_count")))
+        + summary_item("Missing uncertainty", int_value(verification.get("missing_uncertainty_count")))
+        + summary_item("Missing factual support", int_value(verification.get("missing_factual_support_count")))
+        + "</div></div>"
+    )
+
+
+def render_source_files(source_files: Any) -> str:
+    files = source_files if isinstance(source_files, list) else []
+    if not files:
+        return '<p class="muted">No source file references in UI data.</p>'
+    items = "".join(f"<li>{esc(path)}</li>" for path in files)
+    return f"<h3>Source file references</h3><ul class=\"file-list\">{items}</ul>"
+
+
 def render_file_links(file_docs: Any) -> str:
     docs = file_docs if isinstance(file_docs, list) else []
     if not docs:
@@ -541,6 +649,196 @@ def render_history_table(kind: str, runs: list[Any]) -> str:
     )
 
 
+def render_history_table_v2(kind: str, runs: list[Any]) -> str:
+    if not runs:
+        return '<p class="muted">no history runs</p>'
+    rows = []
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        latest = ' <span class="badge ok">latest live</span>' if run.get("latest_live_run") else ""
+        rows.append(
+            "<tr>"
+            f'<td><a href="/history/{kind}/{quote(str(run.get("run_id") or ""), safe="")}">{esc(run.get("run_id"))}</a>{latest}</td>'
+            f"<td>{esc(run.get('generated_at'))}</td>"
+            f"<td>{esc(run.get('provider'))}<br><span class=\"muted\">{esc(run.get('model'))}</span></td>"
+            f"<td>{esc(run.get('selected_modules_count') or len(run.get('selected_modules') or []))}</td>"
+            f"<td>{esc(history_counts_text(kind, run))}</td>"
+            f"<td>{esc(usage_text(run.get('usage_totals')))}</td>"
+            f"<td>{format_rate(run.get('cache_hit_rate'))}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table><thead><tr><th>History run</th><th>Generated at</th>'
+        "<th>Provider / Model</th><th>Selected modules</th><th>Counts</th><th>Usage</th><th>Cache hit rate</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_current_history_notice(run: dict[str, Any]) -> str:
+    if run.get("latest_live_run"):
+        return '<div class="notice">This immutable history entry matches the current latest live run.</div>'
+    return '<div class="notice muted">This is an immutable historical run entry, not the current live summary.</div>'
+
+
+def render_history_run_summary(kind: str, run: dict[str, Any]) -> str:
+    summary_items = [
+        ("Run ID", run.get("run_id")),
+        ("Kind", kind),
+        ("Generated at", run.get("generated_at")),
+        ("Provider", run.get("provider")),
+        ("Model", run.get("model")),
+        ("Dry run", str(bool(run.get("dry_run"))).lower()),
+        ("Latest live run", str(bool(run.get("latest_live_run"))).lower()),
+        ("Manifest", artifact_link(run.get("manifest_path"), "Open history manifest")),
+        ("Selected modules", run.get("selected_modules_count") or len(run.get("selected_modules") or [])),
+        ("Usage totals", usage_text(run.get("usage_totals"))),
+        ("Estimated input tokens", run.get("estimated_input_tokens_total")),
+        ("Cache hit rate", format_rate(run.get("cache_hit_rate"))),
+        ("Result statuses", json.dumps(run.get("result_status_counts") or {}, ensure_ascii=False, sort_keys=True)),
+    ]
+    if kind == "generation":
+        summary_items.extend(
+            [
+                ("Generated", run.get("generated_count")),
+                ("Skipped cached", run.get("skipped_cached_count")),
+                ("Skipped by plan", run.get("skipped_by_plan_count")),
+                ("Failed", run.get("failed_count")),
+            ]
+        )
+    else:
+        summary_items.extend(
+            [
+                ("Verification mode", run.get("verification_mode")),
+                ("Verified", run.get("verified_count")),
+                ("Warnings", run.get("warning_count")),
+                ("Failed", run.get("failed_count")),
+                ("Skipped cached", run.get("skipped_cached_count")),
+                ("Skipped missing enhanced", run.get("skipped_missing_enhanced_count")),
+            ]
+        )
+    return (
+        '<section class="panel history-record"><h2>Run Summary</h2>'
+        + definition_list(summary_items, raw_labels={"Manifest"})
+        + "</section>"
+    )
+
+
+def render_history_results(kind: str, run: dict[str, Any], data: UiDataBundle) -> str:
+    results = run.get("results") if isinstance(run.get("results"), list) else []
+    if not results:
+        return '<section class="panel"><h2>Results</h2><p class="muted">no result rows</p></section>'
+    rows = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        rows.append(render_generation_result_row(result) if kind == "generation" else render_verification_result_row(result))
+    headers = (
+        "<th>Module</th><th>Status</th><th>Priority / Mode</th><th>Cache</th><th>Usage</th><th>Duration</th><th>Artifacts</th><th>Error</th>"
+        if kind == "generation"
+        else "<th>Module</th><th>Status</th><th>Verifier</th><th>Verdict</th><th>Cache</th><th>Usage</th><th>Artifacts</th><th>Error</th>"
+    )
+    return (
+        '<section class="panel"><h2>Results</h2><div class="table-wrap"><table>'
+        f"<thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"
+    )
+
+
+def render_generation_result_row(result: dict[str, Any]) -> str:
+    artifacts = [
+        artifact_link(result.get("output_path"), "enhanced"),
+        artifact_link(result.get("metadata_path"), "metadata"),
+    ]
+    return (
+        "<tr>"
+        f"<td>{module_name_link(result.get('module'))}</td>"
+        f"<td>{status_badge(result.get('status'))}</td>"
+        f"<td>{esc(result.get('priority'))}<br><span class=\"muted\">{esc(result.get('explain_mode'))}</span></td>"
+        f"<td>{presence(result.get('cache_hit'))}</td>"
+        f"<td>{esc(usage_text(result.get('usage')))}</td>"
+        f"<td>{esc(result.get('duration_seconds'))}</td>"
+        f"<td>{'<br>'.join(artifacts)}</td>"
+        f"<td>{esc(result.get('error'))}</td>"
+        "</tr>"
+    )
+
+
+def render_verification_result_row(result: dict[str, Any]) -> str:
+    artifacts = [
+        artifact_link(result.get("verification_json_path"), "json"),
+        artifact_link(result.get("verification_summary_path"), "summary"),
+        artifact_link(result.get("enhanced_markdown_path"), "enhanced"),
+    ]
+    return (
+        "<tr>"
+        f"<td>{module_name_link(result.get('module'))}</td>"
+        f"<td>{status_badge(result.get('status'))}</td>"
+        f"<td>{esc(result.get('verifier_status'))}<br><span class=\"muted\">structured: {esc(result.get('structured_output_valid'))}</span></td>"
+        f"<td>{verdict_badge(result.get('verdict'), result.get('status'))}</td>"
+        f"<td>{presence(result.get('cache_hit'))}</td>"
+        f"<td>{esc(usage_text(result.get('usage')))}</td>"
+        f"<td>{'<br>'.join(artifacts)}</td>"
+        f"<td>{esc(result.get('error'))}</td>"
+        "</tr>"
+    )
+
+
+def detailed_history_runs(data: UiDataBundle, kind: str) -> list[dict[str, Any]]:
+    runs_key = "generation_runs" if kind == "generation" else "verification_runs"
+    detailed = data.history_runs.get(runs_key)
+    if isinstance(detailed, list):
+        return [run for run in detailed if isinstance(run, dict)]
+    fallback = data.history_index.get(runs_key)
+    return [run for run in fallback if isinstance(run, dict)] if isinstance(fallback, list) else []
+
+
+def history_counts_text(kind: str, run: dict[str, Any]) -> str:
+    if kind == "generation":
+        return (
+            f"generated {int_value(run.get('generated_count'))}, "
+            f"cached {int_value(run.get('skipped_cached_count'))}, "
+            f"failed {int_value(run.get('failed_count'))}"
+        )
+    return (
+        f"verified {int_value(run.get('verified_count'))}, "
+        f"warning {int_value(run.get('warning_count'))}, "
+        f"failed {int_value(run.get('failed_count'))}"
+    )
+
+
+def usage_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "no data"
+    return (
+        f"prompt {int_value(value.get('prompt_tokens'))}, "
+        f"completion {int_value(value.get('completion_tokens'))}, "
+        f"total {int_value(value.get('total_tokens'))}"
+    )
+
+
+def format_rate(value: Any) -> str:
+    if value is None:
+        return "no data"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "no data"
+
+
+def module_name_link(name: Any) -> str:
+    if not name:
+        return '<span class="muted">no data</span>'
+    return f'<a href="/module/{quote(str(name), safe="")}">{esc(name)}</a>'
+
+
+def status_badge(status: Any) -> str:
+    text = str(status or "unknown")
+    css = "fail" if "failed" in text or text.endswith("_fail") else "warn" if "warning" in text else "ok"
+    if text in {"unknown", "missing", "skipped_missing_enhanced"}:
+        css = "neutral"
+    return f'<span class="badge {css}">{esc(text)}</span>'
+
+
 def render_artifact_text(title: str, path: Any, config: UiServerConfig) -> str:
     if not path:
         return f"<h3>{esc(title)}</h3><p class=\"muted\">нет данных</p>"
@@ -561,7 +859,7 @@ def render_artifact_pre(path: str, config: UiServerConfig) -> str:
 
 
 def render_error(message: str) -> str:
-    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, []))
+    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, {}, []))
 
 
 def definition_list(items: list[tuple[str, Any]], *, raw_labels: set[str] | None = None) -> str:
@@ -754,6 +1052,82 @@ main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
 .panel { padding: 16px; margin: 14px 0; }
 .panel h2 { margin: 0 0 12px; font-size: 20px; }
 .panel h3 { margin: 18px 0 8px; font-size: 15px; }
+.home-overview { margin-bottom: 12px; }
+.quick-links, .section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.section-nav {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px;
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+}
+.section-nav a {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: #edf2f7;
+}
+.module-summary {
+  border-left: 4px solid var(--brand);
+}
+.summary-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.summary-heading h2 { margin: 0; }
+.summary-heading p { margin: 4px 0 0; color: var(--muted); }
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.summary-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.summary-item {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+.summary-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.summary-item strong {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.structured-summary {
+  padding: 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffaf2;
+}
+.structured-summary h3 { margin-top: 0; }
+.layer-state {
+  margin: 0 0 12px;
+}
+.empty-state {
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: #fbfcfe;
+}
 .layer { border-left: 4px solid var(--line); }
 .factual { border-left-color: #1f5f8b; }
 .enhanced { border-left-color: #237a57; }
@@ -785,6 +1159,7 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
 .badge.neutral { background: #eef1f5; color: var(--muted); }
 .muted { color: var(--muted); }
 .warning { padding: 12px 14px; border: 1px solid #f1c16b; background: #fff8e8; border-radius: 8px; margin-bottom: 16px; }
+.notice { padding: 10px 12px; border: 1px solid var(--line); background: #eef7ff; border-radius: 8px; margin-bottom: 14px; }
 .button { display: inline-block; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .run-line { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
 .link-list, .file-list { padding-left: 18px; }

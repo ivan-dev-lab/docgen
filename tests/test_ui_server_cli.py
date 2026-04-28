@@ -9,6 +9,7 @@ import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 from unittest import mock
 
@@ -179,6 +180,86 @@ class UiServerCliTests(unittest.TestCase):
             },
         )
         self.write_json(
+            ui_data / "history-runs.json",
+            {
+                "schema_version": "1.0",
+                "generation_runs": [
+                    {
+                        "run_id": "generation-run",
+                        "kind": "generation",
+                        "generated_at": "2026-04-28T00:00:00+00:00",
+                        "manifest_path": "docs/enhanced/history/generation/generation-run.json",
+                        "dry_run": False,
+                        "latest_live_run": True,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "selected_modules": ["llm"],
+                        "selected_modules_count": 1,
+                        "generated_count": 1,
+                        "skipped_cached_count": 0,
+                        "skipped_by_plan_count": 0,
+                        "failed_count": 0,
+                        "cache_hit_rate": 0.0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                        "result_status_counts": {"generated": 1},
+                        "results": [
+                            {
+                                "module": "llm",
+                                "status": "generated",
+                                "priority": "high",
+                                "explain_mode": "full",
+                                "cache_hit": False,
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                                "duration_seconds": 1.5,
+                                "output_path": "docs/enhanced/modules/module-package-llm.md",
+                                "metadata_path": "docs/enhanced/llm-runs/module-package-llm.metadata.json",
+                                "error": None,
+                            }
+                        ],
+                    }
+                ],
+                "verification_runs": [
+                    {
+                        "run_id": "verification-run",
+                        "kind": "verification",
+                        "generated_at": "2026-04-28T00:01:00+00:00",
+                        "manifest_path": "docs/enhanced/history/verification/verification-run.json",
+                        "dry_run": False,
+                        "latest_live_run": True,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "verification_mode": "same_context",
+                        "selected_modules": ["llm"],
+                        "selected_modules_count": 1,
+                        "verified_count": 1,
+                        "warning_count": 1,
+                        "failed_count": 0,
+                        "skipped_cached_count": 0,
+                        "skipped_missing_enhanced_count": 0,
+                        "cache_hit_rate": 0.0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                        "result_status_counts": {"verified_warning": 1},
+                        "results": [
+                            {
+                                "module": "llm",
+                                "status": "verified_warning",
+                                "verifier_status": "ok",
+                                "structured_output_valid": True,
+                                "verdict": "warning",
+                                "cache_hit": False,
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                                "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
+                                "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
+                                "enhanced_markdown_path": "docs/enhanced/modules/module-package-llm.md",
+                                "error": None,
+                            }
+                        ],
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+        self.write_json(
             ui_data / "ui-data-manifest.json",
             {
                 "schema_version": "1.0",
@@ -186,6 +267,7 @@ class UiServerCliTests(unittest.TestCase):
                     "current_state": "docs/ui-data/current-state.json",
                     "modules_index": "docs/ui-data/modules-index.json",
                     "history_index": "docs/ui-data/history-index.json",
+                    "history_runs": "docs/ui-data/history-runs.json",
                 },
                 "warnings": [],
             },
@@ -244,14 +326,31 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Project Inspector", home)
         self.assertIn("generation-run", home)
         self.assertIn("/history", home)
+        self.assertIn("#warning-modules", home)
+        self.assertIn("#missing-enhanced", home)
+        self.assertIn("#missing-verification", home)
+        self.assertIn("Latest generation run", home)
+        self.assertIn("Verification warning", home)
         self.assertIn("/module/llm", modules)
+        self.assertIn("Module Summary", module)
+        self.assertIn("Обзор", module)
+        self.assertIn("Факты", module)
+        self.assertIn("ИИ-объяснение", module)
+        self.assertIn("Проверка", module)
+        self.assertIn("Связанные файлы", module)
+        self.assertIn("История", module)
         self.assertIn("Factual", module)
-        self.assertIn("Enhanced", module)
+        self.assertIn("Enhanced explanation", module)
         self.assertIn("Verification", module)
+        self.assertIn("Structured verification summary", module)
+        self.assertLess(module.index("Structured verification summary"), module.index("Verification summary."))
+        self.assertIn("Weak claims", module)
+        self.assertIn("Unsupported claims", module)
         self.assertIn("Related Files", module)
         self.assertIn("/file?path=", module)
         self.assertIn("/history/generation/generation-run", module)
         self.assertIn("Factual layer text", module)
+        self.assertIn("Enhanced explanation.", module)
         self.assertEqual(current_state["latest_generation_run"]["run_id"], "generation-run")
         self.assertNotIn("https://", home + modules + module)
         self.assertNotIn("cdn", (home + modules + module).lower())
@@ -262,17 +361,58 @@ class UiServerCliTests(unittest.TestCase):
         base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
 
         history = urlopen(base_url + "/history").read().decode("utf-8")
+        generation_run = urlopen(base_url + "/history/generation/generation-run").read().decode("utf-8")
         run = urlopen(base_url + "/history/verification/verification-run").read().decode("utf-8")
         file_page = urlopen(
             base_url + "/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md"
         ).read().decode("utf-8")
+        artifact_page = urlopen(
+            base_url + "/artifact?path=docs%2Fenhanced%2Fmodules%2Fmodule-package-llm.md"
+        ).read().decode("utf-8")
 
         self.assertIn("Generation Runs", history)
         self.assertIn("Verification Runs", history)
-        self.assertIn("Selected Modules", run)
+        self.assertIn("latest live", history)
+        self.assertIn("Run Summary", generation_run)
+        self.assertIn("Results", generation_run)
+        self.assertIn("generated 1, cached 0, failed 0", history)
+        self.assertIn("Run Summary", run)
+        self.assertIn("Results", run)
+        self.assertIn("verified_warning", run)
+        self.assertIn("warning", run)
         self.assertIn("/module/llm", run)
+        self.assertIn("/artifact?path=", run)
         self.assertIn("File config", file_page)
         self.assertIn("Related Modules", file_page)
+        self.assertIn("Artifact", artifact_page)
+        self.assertIn("Enhanced explanation.", artifact_page)
+
+    def test_invalid_history_run_returns_not_found_and_empty_history_renders(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(base_url + "/history/generation/missing-run")
+        self.assertEqual(raised.exception.code, 404)
+
+        self.write_json(
+            ui_data / "history-runs.json",
+            {"schema_version": "1.0", "generation_runs": [], "verification_runs": [], "warnings": []},
+        )
+        config = build_server_config(generated, enhanced, ui_data, strict=True)
+        empty_server = create_ui_server(config, host="127.0.0.1", port=0)
+        thread = threading.Thread(target=empty_server.serve_forever, daemon=True)
+        thread.start()
+
+        def cleanup() -> None:
+            empty_server.shutdown()
+            empty_server.server_close()
+            thread.join(2)
+
+        self.addCleanup(cleanup)
+        empty_history = urlopen(f"http://127.0.0.1:{empty_server.server_port}/history").read().decode("utf-8")
+        self.assertIn("no history runs", empty_history)
 
     def test_server_is_read_only_for_artifacts(self) -> None:
         root = self.make_temp_dir()
@@ -281,6 +421,7 @@ class UiServerCliTests(unittest.TestCase):
             ui_data / "current-state.json",
             ui_data / "modules-index.json",
             ui_data / "history-index.json",
+            ui_data / "history-runs.json",
             generated / "modules" / "module-package-llm.md",
             enhanced / "modules" / "module-package-llm.md",
         ]

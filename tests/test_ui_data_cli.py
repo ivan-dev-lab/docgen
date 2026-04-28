@@ -155,6 +155,46 @@ class UiDataCliTests(unittest.TestCase):
                 ],
             },
         )
+        self.write_json(
+            enhanced / "history" / "generation" / "generation-run.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-04-28T00:01:00+00:00",
+                "run_id": "generation-run",
+                "provider": "openrouter",
+                "model": "model-a",
+                "dry_run": False,
+                "selected_modules": ["alpha", "beta"],
+                "total_modules_selected": 2,
+                "generated_count": 1,
+                "skipped_cached_count": 1,
+                "skipped_by_plan_count": 0,
+                "failed_count": 0,
+                "usage_totals": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                "results": [
+                    {
+                        "module": "alpha",
+                        "status": "generated",
+                        "priority": "high",
+                        "explain_mode": "full",
+                        "cache_hit": False,
+                        "usage": {"prompt_tokens": 7, "completion_tokens": 1, "total_tokens": 8},
+                        "duration_seconds": 1.2,
+                        "output_path": "docs/enhanced/modules/module-package-alpha.md",
+                        "metadata_path": "docs/enhanced/llm-runs/module-package-alpha.metadata.json",
+                    },
+                    {
+                        "module": "beta",
+                        "status": "skipped_cached",
+                        "priority": "medium",
+                        "explain_mode": "summary",
+                        "cache_hit": True,
+                        "output_path": "docs/enhanced/modules/module-package-beta.md",
+                        "metadata_path": "docs/enhanced/llm-runs/module-package-beta.metadata.json",
+                    },
+                ],
+            },
+        )
 
         verification_root = enhanced / "verification"
         for name, verdict in (("alpha", "warning"), ("beta", "pass")):
@@ -238,6 +278,51 @@ class UiDataCliTests(unittest.TestCase):
             },
         )
         self.write_json(
+            enhanced / "history" / "verification" / "verification-run.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-04-28T00:02:00+00:00",
+                "run_id": "verification-run",
+                "provider": "openrouter",
+                "model": "model-a",
+                "verification_mode": "same_context",
+                "dry_run": False,
+                "selected_modules": ["alpha", "beta"],
+                "total_modules_selected": 2,
+                "verified_count": 2,
+                "warning_count": 1,
+                "failed_count": 0,
+                "skipped_cached_count": 0,
+                "skipped_missing_enhanced_count": 1,
+                "usage_totals": {"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
+                "results": [
+                    {
+                        "module": "alpha",
+                        "status": "verified_warning",
+                        "verifier_status": "ok",
+                        "structured_output_valid": True,
+                        "verdict": "warning",
+                        "cache_hit": False,
+                        "usage": {"prompt_tokens": 12, "completion_tokens": 2, "total_tokens": 14},
+                        "verification_json_path": "docs/enhanced/verification/module-package-alpha.verification.json",
+                        "verification_summary_path": "docs/enhanced/verification/module-package-alpha.verification.md",
+                        "enhanced_markdown_path": "docs/enhanced/modules/module-package-alpha.md",
+                    },
+                    {
+                        "module": "beta",
+                        "status": "verified_pass",
+                        "verifier_status": "ok",
+                        "structured_output_valid": True,
+                        "verdict": "pass",
+                        "cache_hit": False,
+                        "verification_json_path": "docs/enhanced/verification/module-package-beta.verification.json",
+                        "verification_summary_path": "docs/enhanced/verification/module-package-beta.verification.md",
+                        "enhanced_markdown_path": "docs/enhanced/modules/module-package-beta.md",
+                    },
+                ],
+            },
+        )
+        self.write_json(
             enhanced / "ops-summary.json",
             {
                 "schema_version": "1.0",
@@ -265,7 +350,13 @@ class UiDataCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0, msg=stderr)
         summary = json.loads(stdout)
         self.assertFalse(summary["network_call"])
-        for name in ("current-state.json", "modules-index.json", "history-index.json", "ui-data-manifest.json"):
+        for name in (
+            "current-state.json",
+            "modules-index.json",
+            "history-index.json",
+            "history-runs.json",
+            "ui-data-manifest.json",
+        ):
             self.assertTrue((output / name).is_file(), msg=name)
 
         current = json.loads((output / "current-state.json").read_text(encoding="utf-8"))
@@ -302,6 +393,26 @@ class UiDataCliTests(unittest.TestCase):
         self.assertEqual(history["verification_runs"][0]["run_id"], "verification-run")
         self.assertEqual(history["verification_runs"][0]["verification_mode"], "same_context")
         self.assert_no_backslashes(history)
+
+    def test_history_runs_contains_run_details_and_results(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, output = self.build_fixture(root)
+        build_ui_data(generated, enhanced, output)
+
+        history_runs = json.loads((output / "history-runs.json").read_text(encoding="utf-8"))
+        generation_run = history_runs["generation_runs"][0]
+        verification_run = history_runs["verification_runs"][0]
+
+        self.assertEqual(generation_run["kind"], "generation")
+        self.assertTrue(generation_run["latest_live_run"])
+        self.assertEqual(generation_run["cache_hit_rate"], 0.5)
+        self.assertEqual(generation_run["results"][0]["module"], "alpha")
+        self.assertEqual(generation_run["results"][0]["status"], "generated")
+        self.assertEqual(verification_run["kind"], "verification")
+        self.assertTrue(verification_run["latest_live_run"])
+        self.assertEqual(verification_run["verification_mode"], "same_context")
+        self.assertEqual(verification_run["results"][0]["verdict"], "warning")
+        self.assert_no_backslashes(history_runs)
 
     def test_outputs_are_deterministic_and_sources_are_not_mutated(self) -> None:
         root = self.make_temp_dir()
