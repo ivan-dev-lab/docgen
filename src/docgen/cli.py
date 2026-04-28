@@ -8,10 +8,13 @@ from pathlib import Path
 from .analyzer import analyze_project
 from .llm.config import build_openrouter_config
 from .llm.explain_plan import write_explain_plan
+from .llm.module_batch_explainer import explain_batch
+from .llm.module_batch_verifier import verify_batch
 from .llm.module_explainer import explain_module
 from .llm.module_verifier import DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS, verify_module
 from .llm.openrouter_provider import OpenRouterProvider
 from .renderer import render_project
+from .ui_data import build_ui_data
 
 
 def parse_cli_bool(value: str | bool) -> bool:
@@ -250,6 +253,105 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explain_module_parser.set_defaults(handler=run_explain_module)
 
+    explain_batch_parser = subparsers.add_parser(
+        "explain-batch",
+        help="Generate enhanced markdown for selected modules from explain-plan.",
+    )
+    explain_batch_parser.add_argument(
+        "--plan",
+        dest="plan_path",
+        required=True,
+        help="Path to explain-plan.json.",
+    )
+    explain_batch_parser.add_argument(
+        "--output",
+        dest="output_path",
+        required=True,
+        help="Enhanced docs output root.",
+    )
+    explain_batch_parser.add_argument(
+        "--provider",
+        choices=["openrouter"],
+        default="openrouter",
+        help="LLM provider. Default: openrouter.",
+    )
+    explain_batch_parser.add_argument(
+        "--model",
+        dest="model",
+        help="Optional model override. Defaults to explain-plan.model_plan.default_model.",
+    )
+    explain_batch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build a batch plan and manifest without making network calls.",
+    )
+    explain_batch_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate selected modules even when cache metadata matches.",
+    )
+    explain_batch_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Ignore cache metadata and regenerate selected modules.",
+    )
+    explain_batch_parser.add_argument(
+        "--only-module",
+        dest="only_modules",
+        action="append",
+        default=[],
+        help="Limit batch generation to a module name. Can be used multiple times.",
+    )
+    explain_batch_parser.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        help="Maximum modules to generate after filtering and sorting.",
+    )
+    explain_batch_parser.add_argument(
+        "--include-skip",
+        action="store_true",
+        help="Include modules marked explain_mode=skip.",
+    )
+    explain_batch_parser.add_argument(
+        "--reasoning",
+        nargs="?",
+        const=True,
+        default=None,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Override reasoning mode. Defaults to explain-plan.model_plan.reasoning_enabled.",
+    )
+    explain_batch_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature for generation. Default: 0.2.",
+    )
+    explain_batch_parser.add_argument(
+        "--max-input-tokens",
+        dest="max_input_tokens",
+        type=int,
+        help="Optional override for max input tokens.",
+    )
+    explain_batch_parser.add_argument(
+        "--max-output-tokens",
+        dest="max_output_tokens",
+        type=int,
+        help="Optional override for max output tokens.",
+    )
+    explain_batch_parser.add_argument(
+        "--continue-on-error",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Continue remaining modules after a module failure. Default: true.",
+    )
+    explain_batch_parser.set_defaults(handler=run_explain_batch)
+
     verify_module_parser = subparsers.add_parser(
         "verify-module",
         help="Verify one enhanced module explanation against factual context.",
@@ -329,6 +431,146 @@ def build_parser() -> argparse.ArgumentParser:
         help="Context mode. Default: same_context.",
     )
     verify_module_parser.set_defaults(handler=run_verify_module)
+
+    verify_batch_parser = subparsers.add_parser(
+        "verify-batch",
+        help="Verify selected enhanced module explanations from explain-plan.",
+    )
+    verify_batch_parser.add_argument(
+        "--plan",
+        dest="plan_path",
+        required=True,
+        help="Path to explain-plan.json.",
+    )
+    verify_batch_parser.add_argument(
+        "--enhanced",
+        dest="enhanced_root",
+        required=True,
+        help="Enhanced docs root.",
+    )
+    verify_batch_parser.add_argument(
+        "--output",
+        dest="output_root",
+        required=True,
+        help="Verification output root.",
+    )
+    verify_batch_parser.add_argument(
+        "--provider",
+        choices=["openrouter"],
+        default="openrouter",
+        help="LLM provider. Default: openrouter.",
+    )
+    verify_batch_parser.add_argument(
+        "--model",
+        dest="model",
+        help="Optional model override. Defaults to explain-plan.model_plan.default_model.",
+    )
+    verify_batch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build a verification batch plan and manifest without making network calls.",
+    )
+    verify_batch_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run verification even when cache metadata matches.",
+    )
+    verify_batch_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Ignore verification cache metadata and re-run selected modules.",
+    )
+    verify_batch_parser.add_argument(
+        "--only-module",
+        dest="only_modules",
+        action="append",
+        default=[],
+        help="Limit batch verification to a module name. Can be used multiple times.",
+    )
+    verify_batch_parser.add_argument(
+        "--limit",
+        dest="limit",
+        type=int,
+        help="Maximum modules to verify after filtering and sorting.",
+    )
+    verify_batch_parser.add_argument(
+        "--include-missing-enhanced",
+        action="store_true",
+        help="Mark modules without enhanced markdown as failed_preflight instead of skipped_missing_enhanced.",
+    )
+    verify_batch_parser.add_argument(
+        "--verification-mode",
+        choices=["same_context", "fallback_plan"],
+        default="same_context",
+        help="Context mode. Default: same_context.",
+    )
+    verify_batch_parser.add_argument(
+        "--reasoning",
+        nargs="?",
+        const=True,
+        default=None,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Override reasoning mode. Default follows single-module verifier.",
+    )
+    verify_batch_parser.add_argument(
+        "--temperature",
+        dest="temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature for verification. Default: 0.0.",
+    )
+    verify_batch_parser.add_argument(
+        "--max-output-tokens",
+        dest="max_output_tokens",
+        type=int,
+        default=DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS,
+        help=f"Max output tokens for each verification request. Default: {DEFAULT_VERIFICATION_MAX_OUTPUT_TOKENS}.",
+    )
+    verify_batch_parser.add_argument(
+        "--continue-on-error",
+        nargs="?",
+        const=True,
+        default=True,
+        type=parse_cli_bool,
+        metavar="true|false",
+        help="Continue remaining modules after a module failure. Default: true.",
+    )
+    verify_batch_parser.set_defaults(handler=run_verify_batch)
+
+    ui_data_parser = subparsers.add_parser(
+        "build-ui-data",
+        help="Build normalized JSON data contract artifacts for future UI layers.",
+    )
+    ui_data_parser.add_argument(
+        "--generated",
+        dest="generated_root",
+        required=True,
+        help="Root directory containing generated factual artifacts.",
+    )
+    ui_data_parser.add_argument(
+        "--enhanced",
+        dest="enhanced_root",
+        required=True,
+        help="Root directory containing enhanced docs and LLM manifests.",
+    )
+    ui_data_parser.add_argument(
+        "--output",
+        dest="output_root",
+        required=True,
+        help="Output root for UI data JSON artifacts.",
+    )
+    ui_data_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail when any source manifest is missing or invalid.",
+    )
+    ui_data_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and print a summary without writing UI data files.",
+    )
+    ui_data_parser.set_defaults(handler=run_build_ui_data)
     return parser
 
 
@@ -454,6 +696,28 @@ def run_explain_module(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_explain_batch(args: argparse.Namespace) -> int:
+    manifest = explain_batch(
+        Path(args.plan_path).expanduser(),
+        Path(args.output_path).expanduser(),
+        provider_name=args.provider,
+        model=args.model,
+        dry_run=args.dry_run,
+        force=args.force,
+        no_cache=args.no_cache,
+        only_modules=args.only_modules,
+        limit=args.limit,
+        include_skip=args.include_skip,
+        reasoning=args.reasoning,
+        temperature=args.temperature,
+        max_input_tokens=args.max_input_tokens,
+        max_output_tokens=args.max_output_tokens,
+        continue_on_error=args.continue_on_error,
+    )
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return 1 if int(manifest.get("failed_count") or 0) else 0
+
+
 def run_verify_module(args: argparse.Namespace) -> int:
     result = verify_module(
         Path(args.plan_path).expanduser(),
@@ -475,6 +739,41 @@ def run_verify_module(args: argparse.Namespace) -> int:
             f"Warning: verification structured output invalid: {result.get('parse_errors')}",
             file=sys.stderr,
         )
+    return 0
+
+
+def run_verify_batch(args: argparse.Namespace) -> int:
+    manifest = verify_batch(
+        Path(args.plan_path).expanduser(),
+        Path(args.enhanced_root).expanduser(),
+        Path(args.output_root).expanduser(),
+        provider_name=args.provider,
+        model=args.model,
+        dry_run=args.dry_run,
+        force=args.force,
+        no_cache=args.no_cache,
+        only_modules=args.only_modules,
+        limit=args.limit,
+        include_missing_enhanced=args.include_missing_enhanced,
+        verification_mode=args.verification_mode,
+        reasoning=args.reasoning,
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+        continue_on_error=args.continue_on_error,
+    )
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return 1 if int(manifest.get("failed_count") or 0) else 0
+
+
+def run_build_ui_data(args: argparse.Namespace) -> int:
+    summary = build_ui_data(
+        Path(args.generated_root).expanduser(),
+        Path(args.enhanced_root).expanduser(),
+        Path(args.output_root).expanduser(),
+        strict=args.strict,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
 
