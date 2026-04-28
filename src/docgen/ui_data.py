@@ -11,6 +11,9 @@ MODULES_INDEX_FILENAME = "modules-index.json"
 HISTORY_INDEX_FILENAME = "history-index.json"
 HISTORY_RUNS_FILENAME = "history-runs.json"
 PROBLEMS_INDEX_FILENAME = "problems-index.json"
+FILES_INDEX_FILENAME = "files-index.json"
+FUNCTIONS_INDEX_FILENAME = "functions-index.json"
+SEARCH_INDEX_FILENAME = "search-index.json"
 UI_DATA_MANIFEST_FILENAME = "ui-data-manifest.json"
 
 
@@ -19,14 +22,16 @@ def build_ui_data(
     enhanced_root: Path,
     output_root: Path,
     *,
+    analysis_root: Path | None = None,
     strict: bool = False,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     generated_root = generated_root.expanduser()
     enhanced_root = enhanced_root.expanduser()
     output_root = output_root.expanduser()
+    analysis_root = analysis_root.expanduser() if analysis_root else None
     warnings: list[str] = []
-    sources = source_paths(generated_root, enhanced_root)
+    sources = source_paths(generated_root, enhanced_root, analysis_root)
     payloads = load_sources(sources, strict=strict, warnings=warnings)
     explain_plan = payloads.get("explain_plan")
     if not isinstance(explain_plan, dict):
@@ -51,6 +56,9 @@ def build_ui_data(
     generation_history = payloads.get("generation_history_index") or {}
     verification_history = payloads.get("verification_history_index") or {}
     ops_summary = payloads.get("ops_summary") or {}
+    doc_manifest = payloads.get("doc_manifest") if isinstance(payloads.get("doc_manifest"), dict) else {}
+    analysis_inventory = payloads.get("analysis_inventory") if isinstance(payloads.get("analysis_inventory"), dict) else {}
+    analysis_functions = payloads.get("analysis_function_index") if isinstance(payloads.get("analysis_function_index"), dict) else {}
 
     modules = build_modules_index(
         explain_plan=explain_plan,
@@ -84,6 +92,31 @@ def build_ui_data(
         generated_at=generated_at,
         warnings=warnings,
     )
+    files_index = build_files_index(
+        generated_root=generated_root,
+        doc_manifest=doc_manifest,
+        modules=modules["modules"],
+        analysis_inventory=analysis_inventory,
+        generated_at=generated_at,
+        warnings=warnings,
+    )
+    functions_index = build_functions_index(
+        modules=modules["modules"],
+        analysis_functions=analysis_functions,
+        generated_at=generated_at,
+        warnings=warnings,
+    )
+    search_index = build_search_index(
+        generated_root=generated_root,
+        enhanced_root=enhanced_root,
+        modules=modules["modules"],
+        files=files_index["files"],
+        functions=functions_index["functions"],
+        history_runs=history_runs,
+        problems_index=problems_index,
+        generated_at=generated_at,
+        warnings=warnings,
+    )
     current_state = build_current_state(
         sources=sources,
         generated_at=generated_at,
@@ -106,6 +139,9 @@ def build_ui_data(
         "history_index": history_index,
         "history_runs": history_runs,
         "problems_index": problems_index,
+        "files_index": files_index,
+        "functions_index": functions_index,
+        "search_index": search_index,
         "ui_data_manifest": ui_manifest,
     }
     if not dry_run:
@@ -122,8 +158,8 @@ def build_ui_data(
     }
 
 
-def source_paths(generated_root: Path, enhanced_root: Path) -> dict[str, Path]:
-    return {
+def source_paths(generated_root: Path, enhanced_root: Path, analysis_root: Path | None = None) -> dict[str, Path]:
+    paths = {
         "explain_plan": generated_root / "explain-plan.json",
         "doc_manifest": generated_root / "doc-manifest.json",
         "generation_current_manifest": enhanced_root / "llm-batch-run-manifest.json",
@@ -132,6 +168,10 @@ def source_paths(generated_root: Path, enhanced_root: Path) -> dict[str, Path]:
         "verification_history_index": enhanced_root / "history" / "verification" / "index.json",
         "ops_summary": enhanced_root / "ops-summary.json",
     }
+    if analysis_root:
+        paths["analysis_inventory"] = analysis_root / "inventory.json"
+        paths["analysis_function_index"] = analysis_root / "function-index.json"
+    return paths
 
 
 def load_sources(paths: dict[str, Path], *, strict: bool, warnings: list[str]) -> dict[str, Any]:
@@ -328,6 +368,9 @@ def build_ui_data_manifest(
             "history_index": normalize_path(output_root / HISTORY_INDEX_FILENAME),
             "history_runs": normalize_path(output_root / HISTORY_RUNS_FILENAME),
             "problems_index": normalize_path(output_root / PROBLEMS_INDEX_FILENAME),
+            "files_index": normalize_path(output_root / FILES_INDEX_FILENAME),
+            "functions_index": normalize_path(output_root / FUNCTIONS_INDEX_FILENAME),
+            "search_index": normalize_path(output_root / SEARCH_INDEX_FILENAME),
         },
         "sources": {name: normalize_path(path) for name, path in sources.items()},
         "warnings": warnings,
@@ -412,6 +455,402 @@ def build_problems_index(
         "issue_problems": sorted(issue_problems, key=issue_problem_sort_key),
         "warnings": warnings,
     }
+
+
+def build_files_index(
+    *,
+    generated_root: Path,
+    doc_manifest: dict[str, Any],
+    modules: list[dict[str, Any]],
+    analysis_inventory: dict[str, Any],
+    generated_at: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    module_names_by_file = module_names_by_source_file(modules)
+    inventory_by_file = {
+        normalize_optional_path(item.get("path")): item
+        for item in list_value(analysis_inventory.get("files"))
+        if isinstance(item, dict) and item.get("path")
+    }
+    files = []
+    seen = set()
+    for file_page in list_value(doc_manifest.get("file_pages")):
+        if not isinstance(file_page, dict):
+            continue
+        source_file = normalize_optional_path(file_page.get("source_file"))
+        if not source_file:
+            continue
+        seen.add(source_file)
+        doc_path = generated_root / str(file_page.get("doc_path") or "")
+        files.append(
+            build_file_record(
+                source_file,
+                doc_path=doc_path,
+                file_page=file_page,
+                inventory=inventory_by_file.get(source_file),
+                module_names=module_names_by_file.get(source_file, []),
+            )
+        )
+    for source_file, module_names in module_names_by_file.items():
+        if source_file in seen:
+            continue
+        inventory = inventory_by_file.get(source_file)
+        files.append(
+            build_file_record(
+                source_file,
+                doc_path=None,
+                file_page={},
+                inventory=inventory,
+                module_names=module_names,
+            )
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "files": sorted(files, key=lambda item: str(item.get("path") or "")),
+        "warnings": warnings,
+    }
+
+
+def build_file_record(
+    source_file: str,
+    *,
+    doc_path: Path | None,
+    file_page: dict[str, Any],
+    inventory: dict[str, Any] | None,
+    module_names: list[str],
+) -> dict[str, Any]:
+    inventory = inventory if isinstance(inventory, dict) else {}
+    present = bool(doc_path and doc_path.exists())
+    return {
+        "path": source_file,
+        "doc_path": normalize_path(doc_path) if doc_path else None,
+        "module_names": sorted(set(module_names)),
+        "entity_count": int_value(file_page.get("entity_count")),
+        "import_count": int_value(file_page.get("import_count")),
+        "present_in_generated_docs": present,
+        "file_type": inventory.get("file_type"),
+        "language": inventory.get("language"),
+    }
+
+
+def build_functions_index(
+    *,
+    modules: list[dict[str, Any]],
+    analysis_functions: dict[str, Any],
+    generated_at: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    if not analysis_functions:
+        warnings.append("Analysis function-index not provided; functions-index is empty.")
+    module_names_by_file = module_names_by_source_file(modules)
+    doc_paths_by_file = file_doc_paths_by_source_file(modules)
+    functions = []
+    for entity in list_value(analysis_functions.get("entities")):
+        if not isinstance(entity, dict):
+            continue
+        entity_type = str(entity.get("entity_type") or entity.get("type") or "")
+        if entity_type not in {"function", "method"}:
+            continue
+        source_file = normalize_optional_path(entity.get("file"))
+        name = str(entity.get("name") or "")
+        if not source_file or not name:
+            continue
+        container = str(entity.get("container") or "")
+        qualified_name = f"{container}.{name}" if container else name
+        functions.append(
+            {
+                "name": name,
+                "qualified_name": qualified_name,
+                "source_file": source_file,
+                "doc_path": doc_paths_by_file.get(source_file),
+                "module_names": sorted(set(module_names_by_file.get(source_file, []))),
+                "present_in_function_index": True,
+                "line_start": int_value(entity.get("line_start")),
+                "line_end": int_value(entity.get("line_end")),
+                "signature": entity.get("signature"),
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "functions": sorted(functions, key=lambda item: (str(item.get("source_file") or ""), str(item.get("name") or ""))),
+        "warnings": warnings,
+    }
+
+
+def build_search_index(
+    *,
+    generated_root: Path,
+    enhanced_root: Path,
+    modules: list[dict[str, Any]],
+    files: list[dict[str, Any]],
+    functions: list[dict[str, Any]],
+    history_runs: dict[str, Any],
+    problems_index: dict[str, Any],
+    generated_at: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    records = []
+    records.extend(module_search_records(modules, generated_root, enhanced_root))
+    records.extend(file_search_records(files, generated_root))
+    records.extend(function_search_records(functions))
+    records.extend(history_search_records(history_runs))
+    records.extend(problem_search_records(problems_index))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "records": sorted(records, key=lambda item: (str(item.get("entity_kind") or ""), str(item.get("entity_id") or ""))),
+        "warnings": warnings,
+    }
+
+
+def module_search_records(modules: list[dict[str, Any]], generated_root: Path, enhanced_root: Path) -> list[dict[str, Any]]:
+    records = []
+    for module in modules:
+        name = str(module.get("name") or "")
+        factual = nested_dict(module, "factual")
+        enhanced = nested_dict(module, "enhanced")
+        verification = nested_dict(module, "verification")
+        factual_text = read_index_text(factual.get("module_doc_path"), generated_root)
+        enhanced_text = read_index_text(enhanced.get("markdown_path"), enhanced_root)
+        records.append(
+            search_record(
+                entity_kind="module",
+                entity_id=name,
+                title=name,
+                subtitle=f"{module.get('type')} / {module.get('module_page_role')}",
+                module_name=name,
+                path=factual.get("module_doc_path"),
+                search_text=" ".join(
+                    [
+                        name,
+                        str(module.get("type") or ""),
+                        str(module.get("module_page_role") or ""),
+                        str(module.get("explain_mode") or ""),
+                        str(module.get("priority") or ""),
+                        " ".join(str(item) for item in list_value(factual.get("source_files"))),
+                        factual_text,
+                        enhanced_text,
+                    ]
+                ),
+                type_value=module.get("type"),
+                role=module.get("module_page_role"),
+                verification_verdict=verification.get("verdict") or ("missing" if not verification.get("present") else None),
+                links={
+                    "ui_path": f"/module/{name}",
+                    "artifact_path": enhanced.get("markdown_path") or factual.get("module_doc_path"),
+                },
+            )
+        )
+    return records
+
+
+def file_search_records(files: list[dict[str, Any]], generated_root: Path) -> list[dict[str, Any]]:
+    records = []
+    for file_record in files:
+        path = str(file_record.get("path") or "")
+        if not path:
+            continue
+        doc_text = read_index_text(file_record.get("doc_path"), generated_root)
+        records.append(
+            search_record(
+                entity_kind="file",
+                entity_id=path,
+                title=Path(path).name,
+                subtitle=path,
+                module_name=", ".join(str(item) for item in list_value(file_record.get("module_names"))),
+                path=path,
+                search_text=" ".join([path, Path(path).name, str(file_record.get("language") or ""), doc_text]),
+                type_value=file_record.get("file_type"),
+                links={"ui_path": f"/file?path={file_record.get('doc_path')}", "artifact_path": file_record.get("doc_path")},
+            )
+        )
+    return records
+
+
+def function_search_records(functions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    records = []
+    for function in functions:
+        qualified_name = str(function.get("qualified_name") or function.get("name") or "")
+        source_file = str(function.get("source_file") or "")
+        doc_path = function.get("doc_path")
+        module_names = [str(item) for item in list_value(function.get("module_names"))]
+        ui_path = f"/file?path={doc_path}" if doc_path else f"/module/{module_names[0]}" if module_names else None
+        records.append(
+            search_record(
+                entity_kind="function",
+                entity_id=qualified_name,
+                title=str(function.get("name") or qualified_name),
+                subtitle=f"{source_file}:{function.get('line_start')}",
+                module_name=", ".join(module_names),
+                path=source_file,
+                search_text=" ".join([qualified_name, source_file, str(function.get("signature") or "")]),
+                type_value="function",
+                links={"ui_path": ui_path, "artifact_path": doc_path},
+            )
+        )
+    return records
+
+
+def history_search_records(history_runs: dict[str, Any]) -> list[dict[str, Any]]:
+    records = []
+    for kind, key in (("generation", "generation_runs"), ("verification", "verification_runs")):
+        for run in list_value(history_runs.get(key)):
+            if not isinstance(run, dict):
+                continue
+            run_id = str(run.get("run_id") or "")
+            records.append(
+                search_record(
+                    entity_kind=f"{kind}_run",
+                    entity_id=run_id,
+                    title=run_id,
+                    subtitle=f"{kind} run / {run.get('generated_at')}",
+                    module_name=None,
+                    path=run.get("manifest_path"),
+                    search_text=" ".join([run_id, kind, str(run.get("generated_at") or ""), " ".join(str(item) for item in list_value(run.get("selected_modules")))]),
+                    run_kind=kind,
+                    run_id=run_id,
+                    links={"ui_path": f"/history/{kind}/{run_id}", "artifact_path": run.get("manifest_path")},
+                )
+            )
+    return records
+
+
+def problem_search_records(problems_index: dict[str, Any]) -> list[dict[str, Any]]:
+    records = []
+    for problem in list_value(problems_index.get("module_problems")):
+        if not isinstance(problem, dict):
+            continue
+        module = str(problem.get("module") or "")
+        problem_types = [str(item) for item in list_value(problem.get("problem_types"))]
+        records.append(
+            search_record(
+                entity_kind="problem",
+                entity_id=f"{module}:module:{','.join(problem_types)}",
+                title=f"{module} module problem",
+                subtitle=", ".join(problem_types),
+                module_name=module,
+                path=problem.get("verification_json_path"),
+                search_text=" ".join([module, " ".join(problem_types), str(problem.get("severity") or ""), str(problem.get("verification_verdict") or "")]),
+                verification_verdict=problem.get("verification_verdict"),
+                problem_type=problem_types[0] if problem_types else None,
+                severity=problem.get("severity"),
+                links={"ui_path": f"/problems?module={module}", "artifact_path": problem.get("verification_json_path")},
+            )
+        )
+    for index, problem in enumerate(list_value(problems_index.get("issue_problems"))):
+        if not isinstance(problem, dict):
+            continue
+        module = str(problem.get("module") or "")
+        issue_type = str(problem.get("issue_type") or "")
+        records.append(
+            search_record(
+                entity_kind="problem",
+                entity_id=f"{module}:issue:{issue_type}:{index}",
+                title=f"{module} {issue_type}",
+                subtitle=str(problem.get("reason") or ""),
+                module_name=module,
+                path=problem.get("verification_json_path"),
+                search_text=" ".join(
+                    [
+                        module,
+                        issue_type,
+                        str(problem.get("severity") or ""),
+                        str(problem.get("section") or ""),
+                        str(problem.get("claim_text") or ""),
+                        str(problem.get("reason") or ""),
+                    ]
+                ),
+                problem_type=issue_type,
+                severity=problem.get("severity"),
+                links={"ui_path": f"/problems?module={module}&type={issue_type}", "artifact_path": problem.get("verification_json_path")},
+            )
+        )
+    return records
+
+
+def search_record(
+    *,
+    entity_kind: str,
+    entity_id: str,
+    title: str,
+    subtitle: str,
+    module_name: str | None,
+    path: Any,
+    search_text: str,
+    type_value: Any = None,
+    role: Any = None,
+    verification_verdict: Any = None,
+    run_kind: Any = None,
+    run_id: Any = None,
+    problem_type: Any = None,
+    severity: Any = None,
+    links: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_links = dict(links or {})
+    if normalized_links.get("artifact_path"):
+        normalized_links["artifact_path"] = normalize_optional_path(normalized_links.get("artifact_path"))
+    return {
+        "entity_kind": entity_kind,
+        "entity_id": entity_id,
+        "title": title,
+        "subtitle": subtitle,
+        "module_name": module_name,
+        "path": normalize_optional_path(path) if path else None,
+        "search_text": plain_text(search_text),
+        "type": type_value,
+        "role": role,
+        "verification_verdict": verification_verdict,
+        "run_kind": run_kind,
+        "run_id": run_id,
+        "problem_type": problem_type,
+        "severity": severity,
+        "links": normalized_links,
+    }
+
+
+def module_names_by_source_file(modules: list[dict[str, Any]]) -> dict[str, list[str]]:
+    names_by_file: dict[str, list[str]] = {}
+    for module in modules:
+        name = str(module.get("name") or "")
+        for source_file in list_value(nested_dict(module, "factual").get("source_files")):
+            normalized = normalize_optional_path(source_file)
+            if normalized:
+                names_by_file.setdefault(normalized, []).append(name)
+    return names_by_file
+
+
+def file_doc_paths_by_source_file(modules: list[dict[str, Any]]) -> dict[str, str]:
+    paths_by_file: dict[str, str] = {}
+    for module in modules:
+        for item in list_value(nested_dict(module, "factual").get("file_doc_paths")):
+            if not isinstance(item, dict):
+                continue
+            source_file = normalize_optional_path(item.get("source_file"))
+            doc_path = normalize_optional_path(item.get("doc_path"))
+            if source_file and doc_path:
+                paths_by_file[source_file] = doc_path
+    return paths_by_file
+
+
+def read_index_text(path_value: Any, artifact_root: Path) -> str:
+    if not path_value:
+        return ""
+    path = resolve_recorded_path(path_value, artifact_root)
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        return plain_text(path.read_text(encoding="utf-8", errors="replace")[:20_000])
+    except OSError:
+        return ""
+
+
+def plain_text(value: Any) -> str:
+    text = str(value or "")
+    for char in "#*_`[](){}<>|":
+        text = text.replace(char, " ")
+    return " ".join(text.split())
 
 
 def build_module_problem(module: dict[str, Any]) -> dict[str, Any] | None:
@@ -1005,6 +1444,9 @@ def write_outputs(output_root: Path, outputs: dict[str, dict[str, Any]]) -> None
     write_json(output_root / HISTORY_INDEX_FILENAME, outputs["history_index"])
     write_json(output_root / HISTORY_RUNS_FILENAME, outputs["history_runs"])
     write_json(output_root / PROBLEMS_INDEX_FILENAME, outputs["problems_index"])
+    write_json(output_root / FILES_INDEX_FILENAME, outputs["files_index"])
+    write_json(output_root / FUNCTIONS_INDEX_FILENAME, outputs["functions_index"])
+    write_json(output_root / SEARCH_INDEX_FILENAME, outputs["search_index"])
     write_json(output_root / UI_DATA_MANIFEST_FILENAME, outputs["ui_data_manifest"])
 
 

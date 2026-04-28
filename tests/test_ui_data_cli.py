@@ -52,10 +52,16 @@ class UiDataCliTests(unittest.TestCase):
         output = root / "docs" / "ui-data"
         generated.mkdir(parents=True, exist_ok=True)
         modules_dir = generated / "modules"
+        files_dir = generated / "files"
         modules_dir.mkdir(parents=True, exist_ok=True)
+        files_dir.mkdir(parents=True, exist_ok=True)
         for name in ("alpha", "beta", "missing"):
             (modules_dir / f"module-package-{name}.md").write_text(
                 f"# {name}\n\nThis markdown must not be parsed for UI semantics.\n",
+                encoding="utf-8",
+            )
+            (files_dir / f"file-src-{name}-py.md").write_text(
+                f"# src/{name}.py\n\nFactual file documentation for {name}.\n",
                 encoding="utf-8",
             )
 
@@ -78,6 +84,15 @@ class UiDataCliTests(unittest.TestCase):
                 "schema_version": "1.0",
                 "generated_at": "2026-04-28T00:00:01+00:00",
                 "generated_files": [f"modules/module-package-{name}.md" for name in ("alpha", "beta", "missing")],
+                "file_pages": [
+                    {
+                        "source_file": f"src/{name}.py",
+                        "doc_path": f"files/file-src-{name}-py.md",
+                        "entity_count": 1,
+                        "import_count": 2,
+                    }
+                    for name in ("alpha", "beta", "missing")
+                ],
             },
         )
 
@@ -355,12 +370,64 @@ class UiDataCliTests(unittest.TestCase):
         )
         return generated, enhanced, output
 
+    def build_analysis_fixture(self, root: Path) -> Path:
+        analysis = root / ".docgen-analysis-live"
+        self.write_json(
+            analysis / "inventory.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-04-28T00:00:02+00:00",
+                "files": [
+                    {"path": f"src/{name}.py", "file_type": "source", "language": "python"}
+                    for name in ("alpha", "beta", "missing")
+                ],
+            },
+        )
+        self.write_json(
+            analysis / "function-index.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-04-28T00:00:03+00:00",
+                "entities": [
+                    {
+                        "name": "serve_alpha",
+                        "file": "src/alpha.py",
+                        "line_start": 10,
+                        "line_end": 20,
+                        "entity_type": "function",
+                        "container": "src.alpha",
+                        "signature": "def serve_alpha() -> None",
+                    },
+                    {
+                        "name": "Beta",
+                        "file": "src/beta.py",
+                        "line_start": 1,
+                        "line_end": 8,
+                        "entity_type": "class",
+                        "container": "src.beta",
+                    },
+                ],
+            },
+        )
+        return analysis
+
     def test_build_ui_data_creates_contract_files_and_current_state(self) -> None:
         root = self.make_temp_dir()
         generated, enhanced, output = self.build_fixture(root)
+        analysis = self.build_analysis_fixture(root)
 
         exit_code, stdout, stderr = self.capture_main(
-            ["build-ui-data", "--generated", str(generated), "--enhanced", str(enhanced), "--output", str(output)],
+            [
+                "build-ui-data",
+                "--analysis",
+                str(analysis),
+                "--generated",
+                str(generated),
+                "--enhanced",
+                str(enhanced),
+                "--output",
+                str(output),
+            ],
             cwd=root,
         )
 
@@ -373,6 +440,9 @@ class UiDataCliTests(unittest.TestCase):
             "history-index.json",
             "history-runs.json",
             "problems-index.json",
+            "files-index.json",
+            "functions-index.json",
+            "search-index.json",
             "ui-data-manifest.json",
         ):
             self.assertTrue((output / name).is_file(), msg=name)
@@ -383,6 +453,10 @@ class UiDataCliTests(unittest.TestCase):
         self.assertEqual(current["module_counts"]["total_modules"], 3)
         self.assertEqual(current["module_counts"]["with_enhanced"], 2)
         self.assertEqual(current["module_counts"]["with_verification"], 2)
+        manifest = json.loads((output / "ui-data-manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("files_index", manifest["files"])
+        self.assertIn("functions_index", manifest["files"])
+        self.assertIn("search_index", manifest["files"])
 
     def test_modules_index_covers_plan_presence_and_does_not_parse_markdown(self) -> None:
         root = self.make_temp_dir()
@@ -427,6 +501,35 @@ class UiDataCliTests(unittest.TestCase):
         first_issue = problems["issue_problems"][0]
         self.assertEqual(first_issue["module_path"], "/module/alpha")
         self.assertIn("verification_json_path", first_issue)
+
+    def test_files_functions_and_search_indexes_are_built_from_normalized_sources(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, output = self.build_fixture(root)
+        analysis = self.build_analysis_fixture(root)
+        build_ui_data(generated, enhanced, output, analysis_root=analysis)
+
+        files_index = json.loads((output / "files-index.json").read_text(encoding="utf-8"))
+        functions_index = json.loads((output / "functions-index.json").read_text(encoding="utf-8"))
+        search_index = json.loads((output / "search-index.json").read_text(encoding="utf-8"))
+
+        files = {item["path"]: item for item in files_index["files"]}
+        functions = {item["name"]: item for item in functions_index["functions"]}
+        records = search_index["records"]
+
+        self.assertIn("src/alpha.py", files)
+        self.assertTrue(files["src/alpha.py"]["doc_path"].endswith("docs/generated/files/file-src-alpha-py.md"))
+        self.assertEqual(files["src/alpha.py"]["module_names"], ["alpha"])
+        self.assertIn("serve_alpha", functions)
+        self.assertEqual(functions["serve_alpha"]["source_file"], "src/alpha.py")
+        self.assertEqual(functions["serve_alpha"]["module_names"], ["alpha"])
+        self.assertTrue(any(record["entity_kind"] == "module" and record["title"] == "alpha" for record in records))
+        self.assertTrue(any(record["entity_kind"] == "file" and record["title"] == "alpha.py" for record in records))
+        self.assertTrue(any(record["entity_kind"] == "function" and record["title"] == "serve_alpha" for record in records))
+        self.assertTrue(any(record["entity_kind"] == "problem" and record["problem_type"] == "weak_claim" for record in records))
+        self.assertTrue(any("Enhanced" in record["search_text"] for record in records if record["entity_kind"] == "module"))
+        self.assert_no_backslashes(files_index)
+        self.assert_no_backslashes(functions_index)
+        self.assert_no_backslashes(search_index)
 
     def test_history_index_uses_history_indexes_and_paths_are_forward_slash(self) -> None:
         root = self.make_temp_dir()

@@ -562,6 +562,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output root for UI data JSON artifacts.",
     )
     ui_data_parser.add_argument(
+        "--analysis",
+        dest="analysis_root",
+        default=None,
+        help="Optional analysis artifact root used to build files/functions/search indexes.",
+    )
+    ui_data_parser.add_argument(
         "--strict",
         action="store_true",
         help="Fail when any source manifest is missing or invalid.",
@@ -821,6 +827,7 @@ def run_build_ui_data(args: argparse.Namespace) -> int:
         Path(args.generated_root).expanduser(),
         Path(args.enhanced_root).expanduser(),
         Path(args.output_root).expanduser(),
+        analysis_root=Path(args.analysis_root).expanduser() if args.analysis_root else None,
         strict=args.strict,
         dry_run=args.dry_run,
     )

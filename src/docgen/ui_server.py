@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from docgen.ui_run_diff import RunDiffError, build_run_diff
+
 REQUIRED_UI_DATA_FILES = {
     "current_state": "current-state.json",
     "modules_index": "modules-index.json",
@@ -20,6 +22,9 @@ REQUIRED_UI_DATA_FILES = {
 }
 OPTIONAL_UI_DATA_FILES = {
     "problems_index": "problems-index.json",
+    "files_index": "files-index.json",
+    "functions_index": "functions-index.json",
+    "search_index": "search-index.json",
 }
 DISPLAY_TEXT_LIMIT = 200_000
 
@@ -40,6 +45,9 @@ class UiDataBundle:
     history_index: dict[str, Any]
     history_runs: dict[str, Any]
     problems_index: dict[str, Any]
+    files_index: dict[str, Any]
+    functions_index: dict[str, Any]
+    search_index: dict[str, Any]
     ui_data_manifest: dict[str, Any]
     warnings: list[str]
 
@@ -149,6 +157,9 @@ def load_ui_data(config: UiServerConfig) -> UiDataBundle:
         history_index=payloads["history_index"],
         history_runs=payloads["history_runs"],
         problems_index=payloads["problems_index"],
+        files_index=payloads["files_index"],
+        functions_index=payloads["functions_index"],
+        search_index=payloads["search_index"],
         ui_data_manifest=payloads["ui_data_manifest"],
         warnings=warnings,
     )
@@ -177,6 +188,10 @@ def server_summary(
             "/modules",
             "/module/{name}",
             "/problems",
+            "/search",
+            "/compare",
+            "/compare/generation",
+            "/compare/verification",
             "/history",
             "/history/generation/{run_id}",
             "/history/verification/{run_id}",
@@ -205,6 +220,14 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
                 self.send_html(render_module(unquote(path.removeprefix("/module/")), self.server.config, self.server.data))
             elif path == "/problems":
                 self.send_html(render_problems(parsed.query, self.server.config, self.server.data))
+            elif path == "/search":
+                self.send_html(render_search(parsed.query, self.server.config, self.server.data))
+            elif path == "/compare":
+                self.send_html(render_compare(self.server.config, self.server.data))
+            elif path == "/compare/generation":
+                self.send_html(render_compare_run("generation", parsed.query, self.server.config, self.server.data))
+            elif path == "/compare/verification":
+                self.send_html(render_compare_run("verification", parsed.query, self.server.config, self.server.data))
             elif path == "/history":
                 self.send_html(render_history(self.server.config, self.server.data))
             elif path.startswith("/history/"):
@@ -459,6 +482,80 @@ def render_problems(query: str, config: UiServerConfig, data: UiDataBundle) -> s
     return layout("Problems", "\n".join(content), data)
 
 
+def render_search(query: str, config: UiServerConfig, data: UiDataBundle) -> str:
+    params = parse_qs(query)
+    filters = {
+        "q": first_query_value(params, "q"),
+        "kind": first_query_value(params, "kind"),
+        "verdict": first_query_value(params, "verdict"),
+        "type": first_query_value(params, "type"),
+        "role": first_query_value(params, "role"),
+        "severity": first_query_value(params, "severity"),
+        "run_kind": first_query_value(params, "run_kind"),
+        "run_id": first_query_value(params, "run_id"),
+    }
+    records = [
+        record
+        for record in list_value(data.search_index.get("records"))
+        if isinstance(record, dict) and search_record_matches(record, filters)
+    ]
+    records = sorted(records, key=lambda record: search_rank(record, filters.get("q")))
+    content = [
+        page_header("Search / Поиск", "Deterministic search over prebuilt UI data indexes."),
+        render_search_form(filters),
+        render_search_state(data.search_index, records, filters),
+        '<section class="panel"><h2>Results</h2>',
+        render_search_results(records),
+        "</section>",
+    ]
+    return layout("Search", "\n".join(content), data)
+
+
+def render_compare(config: UiServerConfig, data: UiDataBundle) -> str:
+    generation_runs = detailed_history_runs(data, "generation")
+    verification_runs = detailed_history_runs(data, "verification")
+    content = [
+        page_header("Compare / Сравнение", "Structural run-to-run diff over immutable history manifests."),
+        '<section class="panel"><h2>Generation runs</h2>',
+        render_compare_picker("generation", generation_runs),
+        "</section>",
+        '<section class="panel"><h2>Verification runs</h2>',
+        render_compare_picker("verification", verification_runs),
+        "</section>",
+    ]
+    return layout("Compare", "\n".join(content), data)
+
+
+def render_compare_run(kind: str, query: str, config: UiServerConfig, data: UiDataBundle) -> str:
+    params = parse_qs(query)
+    run_a_id = first_query_value(params, "run_a")
+    run_b_id = first_query_value(params, "run_b")
+    if not run_a_id or not run_b_id:
+        return layout(
+            "Compare",
+            page_header(f"{kind.title()} Compare", "Select two run_id values on /compare before running a diff.")
+            + '<div class="warning">Missing run_a or run_b.</div>',
+            data,
+        )
+    runs = detailed_history_runs(data, kind)
+    run_a = next((run for run in runs if run.get("run_id") == run_a_id), None)
+    run_b = next((run for run in runs if run.get("run_id") == run_b_id), None)
+    if run_a is None or run_b is None:
+        missing = run_a_id if run_a is None else run_b_id
+        raise UiNotFound(f"Unknown {kind} run: {missing}")
+    try:
+        diff = build_run_diff(kind, run_a, run_b)
+    except RunDiffError as exc:
+        raise ValueError(str(exc)) from exc
+    content = [
+        page_header(f"{kind.title()} Compare", f"{run_a_id} -> {run_b_id}"),
+        render_compare_run_header(kind, diff),
+        render_compare_summary(kind, diff),
+        render_compare_module_table(kind, diff),
+    ]
+    return layout(f"{kind.title()} Compare", "\n".join(content), data)
+
+
 def render_history(config: UiServerConfig, data: UiDataBundle) -> str:
     generation_runs = detailed_history_runs(data, "generation")
     verification_runs = detailed_history_runs(data, "verification")
@@ -542,7 +639,10 @@ def layout(title: str, content: str, data: UiDataBundle) -> str:
         '<link rel="stylesheet" href="/static/style.css">'
         "</head><body>"
         '<header class="topbar"><a class="brand" href="/">Docgen UI</a>'
-        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/problems">Problems</a><a href="/history">History</a>'
+        '<form class="global-search" action="/search" method="get">'
+        '<input name="q" type="search" placeholder="Search modules, files, functions" aria-label="Search">'
+        '<button type="submit">Search</button></form>'
+        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/problems">Problems</a><a href="/search">Search</a><a href="/compare">Compare</a><a href="/history">History</a>'
         '<a href="/ui-data/current-state.json">current-state.json</a></nav></header>'
         f"<main>{warning_html}{content}</main>"
         "</body></html>"
@@ -639,6 +739,285 @@ def render_problem_filters(filters: dict[str, str | None]) -> str:
         + "".join(f'<a class="button" href="{esc(url)}">{esc(label)}</a>' for label, url in links)
         + "</div></section>"
     )
+
+
+def render_search_form(filters: dict[str, str | None]) -> str:
+    return (
+        '<section class="panel search-controls"><h2>Search filters</h2>'
+        '<form class="search-form" action="/search" method="get">'
+        f'<label>Query<input name="q" value="{esc(filters.get("q") or "")}"></label>'
+        f'<label>Kind<input name="kind" value="{esc(filters.get("kind") or "")}" placeholder="module|file|function|problem"></label>'
+        f'<label>Verdict<input name="verdict" value="{esc(filters.get("verdict") or "")}" placeholder="pass|warning|fail|missing"></label>'
+        f'<label>Type<input name="type" value="{esc(filters.get("type") or "")}" placeholder="package|weak_claim"></label>'
+        f'<label>Role<input name="role" value="{esc(filters.get("role") or "")}" placeholder="detailed"></label>'
+        f'<label>Severity<input name="severity" value="{esc(filters.get("severity") or "")}" placeholder="warning|fail|info"></label>'
+        f'<label>Run kind<input name="run_kind" value="{esc(filters.get("run_kind") or "")}" placeholder="generation|verification"></label>'
+        f'<label>Run ID<input name="run_id" value="{esc(filters.get("run_id") or "")}"></label>'
+        '<button type="submit">Search</button>'
+        "</form></section>"
+    )
+
+
+def render_search_state(search_index: dict[str, Any], records: list[dict[str, Any]], filters: dict[str, str | None]) -> str:
+    if not search_index:
+        return '<div class="warning">Search index is unavailable. Run build-ui-data to rebuild UI indexes.</div>'
+    active = [f"{key}={value}" for key, value in filters.items() if value]
+    active_text = ", ".join(active) if active else "none"
+    if not records:
+        return f'<div class="notice muted">No search results. Active filters: {esc(active_text)}</div>'
+    return f'<div class="notice">Results count: {len(records)}. Active filters: {esc(active_text)}</div>'
+
+
+def render_search_results(records: list[dict[str, Any]]) -> str:
+    if not records:
+        return '<p class="muted">No results.</p>'
+    items = []
+    for record in records:
+        links = record.get("links") if isinstance(record.get("links"), dict) else {}
+        ui_path = links.get("ui_path")
+        artifact_path = links.get("artifact_path")
+        meta = [
+            f"kind: {record.get('entity_kind')}",
+            f"type: {record.get('type')}" if record.get("type") else "",
+            f"role: {record.get('role')}" if record.get("role") else "",
+            f"verdict: {record.get('verification_verdict')}" if record.get("verification_verdict") else "",
+            f"severity: {record.get('severity')}" if record.get("severity") else "",
+            f"run: {record.get('run_kind')} {record.get('run_id')}" if record.get("run_id") else "",
+        ]
+        items.append(
+            '<article class="search-result">'
+            f'<h3>{search_result_link(record.get("title"), ui_path)}</h3>'
+            f'<p>{esc(record.get("subtitle"))}</p>'
+            f'<p class="muted">{esc(" | ".join(item for item in meta if item))}</p>'
+            f'<p>{artifact_link(artifact_path, "artifact") if artifact_path else ""}</p>'
+            "</article>"
+        )
+    return "".join(items)
+
+
+def search_result_link(title: Any, ui_path: Any) -> str:
+    if ui_path:
+        return f'<a href="{esc(ui_path)}">{esc(title)}</a>'
+    return esc(title)
+
+
+def search_record_matches(record: dict[str, Any], filters: dict[str, str | None]) -> bool:
+    query = (filters.get("q") or "").strip().lower()
+    if query:
+        haystack = " ".join(
+            str(record.get(key) or "")
+            for key in ("title", "subtitle", "entity_id", "module_name", "path", "search_text")
+        ).lower()
+        if query not in haystack:
+            return False
+    kind = filters.get("kind")
+    if kind and str(record.get("entity_kind") or "") != kind:
+        return False
+    verdict = filters.get("verdict")
+    if verdict and str(record.get("verification_verdict") or "") != verdict:
+        return False
+    type_filter = filters.get("type")
+    if type_filter and type_filter not in {str(record.get("type") or ""), str(record.get("problem_type") or "")}:
+        return False
+    role = filters.get("role")
+    if role and str(record.get("role") or "") != role:
+        return False
+    severity = filters.get("severity")
+    if severity and str(record.get("severity") or "") != severity:
+        return False
+    run_kind = filters.get("run_kind")
+    if run_kind and str(record.get("run_kind") or "") != run_kind:
+        return False
+    run_id = filters.get("run_id")
+    if run_id and str(record.get("run_id") or "") != run_id:
+        return False
+    return True
+
+
+def search_rank(record: dict[str, Any], query: str | None) -> tuple[int, str, str]:
+    normalized_query = (query or "").strip().lower()
+    title = str(record.get("title") or "").lower()
+    if normalized_query and title == normalized_query:
+        rank = 0
+    elif normalized_query and normalized_query in title:
+        rank = 1
+    else:
+        rank = 2
+    return (rank, str(record.get("entity_kind") or ""), str(record.get("title") or ""))
+
+
+def render_compare_picker(kind: str, runs: list[dict[str, Any]]) -> str:
+    if not runs:
+        return '<p class="muted">No history runs available.</p>'
+    options = "".join(
+        f'<option value="{esc(run.get("run_id"))}">{esc(run.get("run_id"))} - {esc(run.get("generated_at"))}</option>'
+        for run in runs
+    )
+    quick_link = ""
+    if len(runs) >= 2:
+        quick_link = (
+            f'<p><a class="button" href="/compare/{kind}?run_a={quote(str(runs[1].get("run_id") or ""), safe="")}'
+            f'&run_b={quote(str(runs[0].get("run_id") or ""), safe="")}">Compare latest two {kind} runs</a></p>'
+        )
+    else:
+        quick_link = '<p class="muted">At least two runs are required for comparison.</p>'
+    return (
+        f'<form class="search-form" action="/compare/{kind}" method="get">'
+        f'<label>Run A<select name="run_a">{options}</select></label>'
+        f'<label>Run B<select name="run_b">{options}</select></label>'
+        '<button type="submit">Compare</button>'
+        "</form>"
+        + quick_link
+        + render_compare_run_list(kind, runs)
+    )
+
+
+def render_compare_run_list(kind: str, runs: list[dict[str, Any]]) -> str:
+    rows = []
+    for run in runs:
+        rows.append(
+            "<tr>"
+            f"<td>{history_link(kind, run.get('run_id'), run.get('run_id'))}</td>"
+            f"<td>{esc(run.get('generated_at'))}</td>"
+            f"<td>{esc(run.get('provider'))}<br><span class=\"muted\">{esc(run.get('model'))}</span></td>"
+            f"<td>{esc(run.get('selected_modules_count') or len(run.get('selected_modules') or []))}</td>"
+            f"<td>{esc(usage_text(run.get('usage_totals')))}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table><thead><tr><th>Run</th><th>Generated at</th>'
+        "<th>Provider / Model</th><th>Selected modules</th><th>Usage</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_compare_run_header(kind: str, diff: dict[str, Any]) -> str:
+    run_a = diff.get("run_a") if isinstance(diff.get("run_a"), dict) else {}
+    run_b = diff.get("run_b") if isinstance(diff.get("run_b"), dict) else {}
+    return (
+        '<section class="panel"><h2>Compared runs</h2>'
+        '<div class="compare-runs">'
+        + render_compare_run_card(kind, "Run A", run_a)
+        + render_compare_run_card(kind, "Run B", run_b)
+        + "</div></section>"
+    )
+
+
+def render_compare_run_card(kind: str, label: str, run: dict[str, Any]) -> str:
+    latest = ' <span class="badge ok">matches current live run</span>' if run.get("latest_live_run") else ""
+    return (
+        '<div class="summary-item compare-run-card">'
+        f"<span>{esc(label)}</span>"
+        f"<strong>{history_link(kind, run.get('run_id'), run.get('run_id'))}{latest}</strong>"
+        f"<p>{esc(run.get('generated_at'))}</p>"
+        f"<p>{esc(run.get('provider'))} / {esc(run.get('model'))}</p>"
+        f"<p>selected: {esc(run.get('selected_modules_count'))}</p>"
+        f"<p>{esc(usage_text(run.get('usage_totals')))}</p>"
+        f"<p>{artifact_link(run.get('manifest_path'), 'history manifest')}</p>"
+        "</div>"
+    )
+
+
+def render_compare_summary(kind: str, diff: dict[str, Any]) -> str:
+    summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
+    items = [
+        metric("Added", summary.get("modules_added_count", 0)),
+        metric("Removed", summary.get("modules_removed_count", 0)),
+        metric("Changed", summary.get("modules_changed_count", 0)),
+        metric("Unchanged", summary.get("modules_unchanged_count", 0)),
+        metric("Usage delta", usage_delta_text(summary.get("usage_total_delta"))),
+    ]
+    if kind == "generation":
+        items.extend(
+            [
+                metric("Generated delta", summary.get("generated_count_delta", 0)),
+                metric("Cached delta", summary.get("skipped_cached_count_delta", 0)),
+                metric("Failed delta", summary.get("failed_count_delta", 0)),
+            ]
+        )
+    else:
+        items.extend(
+            [
+                metric("Verdict improved", summary.get("verdict_improved_count", 0)),
+                metric("Verdict worsened", summary.get("verdict_worsened_count", 0)),
+                metric("Verdict unchanged", summary.get("verdict_unchanged_count", 0)),
+            ]
+        )
+    return '<section class="metrics compare-summary">' + "".join(items) + "</section>"
+
+
+def render_compare_module_table(kind: str, diff: dict[str, Any]) -> str:
+    module_diffs = diff.get("module_diffs") if isinstance(diff.get("module_diffs"), list) else []
+    if not module_diffs:
+        return '<section class="panel"><h2>Module diffs</h2><p class="muted">No module results to compare.</p></section>'
+    rows = []
+    for item in module_diffs:
+        if not isinstance(item, dict):
+            continue
+        rows.append(render_generation_diff_row(item) if kind == "generation" else render_verification_diff_row(item))
+    headers = (
+        "<th>Module</th><th>Change</th><th>Status A</th><th>Status B</th><th>Usage delta</th><th>Changed fields</th>"
+        if kind == "generation"
+        else "<th>Module</th><th>Change</th><th>Verdict A</th><th>Verdict B</th><th>Direction</th><th>Issue delta</th><th>Usage delta</th><th>Changed fields</th>"
+    )
+    return (
+        '<section class="panel"><h2>Module diffs</h2><div class="table-wrap"><table>'
+        f"<thead><tr>{headers}</tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"
+    )
+
+
+def render_generation_diff_row(item: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{module_name_link(item.get('module'))}</td>"
+        f"<td>{status_badge(item.get('change_status'))}</td>"
+        f"<td>{esc(item.get('status_a'))}</td>"
+        f"<td>{esc(item.get('status_b'))}</td>"
+        f"<td>{esc(usage_delta_text(item.get('usage_delta')))}</td>"
+        f"<td>{esc(', '.join(str(field) for field in list_value(item.get('changed_fields'))))}</td>"
+        "</tr>"
+    )
+
+
+def render_verification_diff_row(item: dict[str, Any]) -> str:
+    return (
+        "<tr>"
+        f"<td>{module_name_link(item.get('module'))}</td>"
+        f"<td>{status_badge(item.get('change_status'))}</td>"
+        f"<td>{verdict_badge(item.get('verdict_a'), None)}</td>"
+        f"<td>{verdict_badge(item.get('verdict_b'), None)}</td>"
+        f"<td>{status_badge(item.get('verdict_direction'))}</td>"
+        f"<td>{esc(issue_delta_text(item.get('issue_count_delta')))}</td>"
+        f"<td>{esc(usage_delta_text(item.get('usage_delta')))}</td>"
+        f"<td>{esc(', '.join(str(field) for field in list_value(item.get('changed_fields'))))}</td>"
+        "</tr>"
+    )
+
+
+def usage_delta_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "no data"
+    return (
+        f"prompt {signed_int(value.get('prompt_tokens'))}, "
+        f"completion {signed_int(value.get('completion_tokens'))}, "
+        f"total {signed_int(value.get('total_tokens'))}"
+    )
+
+
+def issue_delta_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "no data"
+    return (
+        f"weak {signed_int(value.get('weak_claims'))}, "
+        f"unsupported {signed_int(value.get('unsupported_claims'))}, "
+        f"support {signed_int(value.get('missing_factual_support'))}, "
+        f"uncertainty {signed_int(value.get('missing_uncertainty'))}"
+    )
+
+
+def signed_int(value: Any) -> str:
+    number = int_value(value)
+    return f"+{number}" if number > 0 else str(number)
 
 
 def render_module_problems_table(problems: list[dict[str, Any]]) -> str:
@@ -1099,7 +1478,7 @@ def render_artifact_pre(path: str, config: UiServerConfig) -> str:
 
 
 def render_error(message: str) -> str:
-    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, {}, {}, []))
+    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, {}, {}, {}, {}, {}, []))
 
 
 def definition_list(items: list[tuple[str, Any]], *, raw_labels: set[str] | None = None) -> str:
@@ -1275,6 +1654,24 @@ a:hover { text-decoration: underline; }
 .brand { color: #fff; font-weight: 700; }
 .topbar nav { display: flex; gap: 14px; flex-wrap: wrap; }
 .topbar nav a { color: #dbe8f3; }
+.global-search {
+  display: flex;
+  gap: 6px;
+  min-width: min(360px, 100%);
+}
+.global-search input, .search-form input {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.global-search button, .search-form button {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+}
 main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
 .page-title { margin: 0 0 18px; }
 .page-title h1 { margin: 0; font-size: 28px; line-height: 1.15; }
@@ -1302,6 +1699,25 @@ main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
   flex-wrap: wrap;
   gap: 8px;
 }
+.search-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+.search-form label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.search-result {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.search-result:last-child { border-bottom: 0; }
+.search-result h3 { margin: 0 0 4px; }
+.search-result p { margin: 4px 0; }
 .section-nav {
   position: sticky;
   top: 0;
@@ -1336,6 +1752,14 @@ main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
 }
 .summary-grid.compact {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.compare-runs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.compare-run-card p {
+  margin: 6px 0 0;
 }
 .summary-item {
   min-width: 0;

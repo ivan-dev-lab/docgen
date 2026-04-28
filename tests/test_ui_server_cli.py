@@ -166,6 +166,20 @@ class UiServerCliTests(unittest.TestCase):
                         "skipped_by_plan_count": 0,
                         "failed_count": 0,
                         "usage_totals": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    },
+                    {
+                        "run_id": "generation-run-prev",
+                        "generated_at": "2026-04-27T00:00:00+00:00",
+                        "manifest_path": "docs/enhanced/history/generation/generation-run-prev.json",
+                        "dry_run": False,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "selected_modules": ["llm"],
+                        "generated_count": 1,
+                        "skipped_cached_count": 0,
+                        "skipped_by_plan_count": 0,
+                        "failed_count": 0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
                     }
                 ],
                 "verification_runs": [
@@ -184,6 +198,22 @@ class UiServerCliTests(unittest.TestCase):
                         "skipped_cached_count": 0,
                         "skipped_missing_enhanced_count": 0,
                         "usage_totals": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                    },
+                    {
+                        "run_id": "verification-run-prev",
+                        "generated_at": "2026-04-27T00:01:00+00:00",
+                        "manifest_path": "docs/enhanced/history/verification/verification-run-prev.json",
+                        "dry_run": False,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "verification_mode": "same_context",
+                        "selected_modules": ["llm"],
+                        "verified_count": 1,
+                        "warning_count": 0,
+                        "failed_count": 1,
+                        "skipped_cached_count": 0,
+                        "skipped_missing_enhanced_count": 0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
                     }
                 ],
                 "warnings": [],
@@ -226,6 +256,40 @@ class UiServerCliTests(unittest.TestCase):
                                 "error": None,
                             }
                         ],
+                    },
+                    {
+                        "run_id": "generation-run-prev",
+                        "kind": "generation",
+                        "generated_at": "2026-04-27T00:00:00+00:00",
+                        "manifest_path": "docs/enhanced/history/generation/generation-run-prev.json",
+                        "dry_run": False,
+                        "latest_live_run": False,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "selected_modules": ["llm"],
+                        "selected_modules_count": 1,
+                        "generated_count": 1,
+                        "skipped_cached_count": 0,
+                        "skipped_by_plan_count": 0,
+                        "failed_count": 0,
+                        "cache_hit_rate": 0.0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                        "result_status_counts": {"generated": 1},
+                        "results": [
+                            {
+                                "module": "llm",
+                                "status": "generated",
+                                "priority": "high",
+                                "explain_mode": "full",
+                                "cache_hit": False,
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                                "duration_seconds": 1.0,
+                                "output_path": "docs/enhanced/modules/module-package-llm.md",
+                                "metadata_path": "docs/enhanced/llm-runs/module-package-llm.metadata.json",
+                                "context_fingerprint": "old-fingerprint",
+                                "error": None,
+                            }
+                        ],
                     }
                 ],
                 "verification_runs": [
@@ -258,6 +322,50 @@ class UiServerCliTests(unittest.TestCase):
                                 "verdict": "warning",
                                 "cache_hit": False,
                                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                                "weak_claims_count": 1,
+                                "unsupported_claims_count": 0,
+                                "missing_factual_support_count": 0,
+                                "missing_uncertainty_count": 0,
+                                "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
+                                "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
+                                "enhanced_markdown_path": "docs/enhanced/modules/module-package-llm.md",
+                                "error": None,
+                            }
+                        ],
+                    },
+                    {
+                        "run_id": "verification-run-prev",
+                        "kind": "verification",
+                        "generated_at": "2026-04-27T00:01:00+00:00",
+                        "manifest_path": "docs/enhanced/history/verification/verification-run-prev.json",
+                        "dry_run": False,
+                        "latest_live_run": False,
+                        "provider": "openrouter",
+                        "model": "model",
+                        "verification_mode": "same_context",
+                        "selected_modules": ["llm"],
+                        "selected_modules_count": 1,
+                        "verified_count": 1,
+                        "warning_count": 0,
+                        "failed_count": 1,
+                        "skipped_cached_count": 0,
+                        "skipped_missing_enhanced_count": 0,
+                        "cache_hit_rate": 0.0,
+                        "usage_totals": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                        "result_status_counts": {"verified_fail": 1},
+                        "results": [
+                            {
+                                "module": "llm",
+                                "status": "verified_fail",
+                                "verifier_status": "ok",
+                                "structured_output_valid": True,
+                                "verdict": "fail",
+                                "cache_hit": False,
+                                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                                "weak_claims_count": 2,
+                                "unsupported_claims_count": 0,
+                                "missing_factual_support_count": 1,
+                                "missing_uncertainty_count": 0,
                                 "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
                                 "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
                                 "enhanced_markdown_path": "docs/enhanced/modules/module-package-llm.md",
@@ -279,6 +387,9 @@ class UiServerCliTests(unittest.TestCase):
                     "history_index": "docs/ui-data/history-index.json",
                     "history_runs": "docs/ui-data/history-runs.json",
                     "problems_index": "docs/ui-data/problems-index.json",
+                    "files_index": "docs/ui-data/files-index.json",
+                    "functions_index": "docs/ui-data/functions-index.json",
+                    "search_index": "docs/ui-data/search-index.json",
                 },
                 "warnings": [],
             },
@@ -329,6 +440,149 @@ class UiServerCliTests(unittest.TestCase):
                         "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
                         "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
                     }
+                ],
+                "warnings": [],
+            },
+        )
+        self.write_json(
+            ui_data / "files-index.json",
+            {
+                "schema_version": "1.0",
+                "files": [
+                    {
+                        "path": "src/docgen/ui_server.py",
+                        "doc_path": "docs/generated/files/file-src-docgen-llm-config-py.md",
+                        "module_names": ["llm"],
+                        "entity_count": 1,
+                        "import_count": 2,
+                        "present_in_generated_docs": True,
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+        self.write_json(
+            ui_data / "functions-index.json",
+            {
+                "schema_version": "1.0",
+                "functions": [
+                    {
+                        "name": "serve_ui",
+                        "qualified_name": "docgen.ui_server.serve_ui",
+                        "source_file": "src/docgen/ui_server.py",
+                        "doc_path": "docs/generated/files/file-src-docgen-llm-config-py.md",
+                        "module_names": ["llm"],
+                        "present_in_function_index": True,
+                    }
+                ],
+                "warnings": [],
+            },
+        )
+        self.write_json(
+            ui_data / "search-index.json",
+            {
+                "schema_version": "1.0",
+                "records": [
+                    {
+                        "entity_kind": "module",
+                        "entity_id": "llm",
+                        "title": "llm",
+                        "subtitle": "package / detailed",
+                        "module_name": "llm",
+                        "path": "docs/generated/modules/module-package-llm.md",
+                        "search_text": "llm package detailed Enhanced explanation Factual layer",
+                        "type": "package",
+                        "role": "detailed",
+                        "verification_verdict": "warning",
+                        "run_kind": None,
+                        "run_id": None,
+                        "problem_type": None,
+                        "severity": None,
+                        "links": {
+                            "ui_path": "/module/llm",
+                            "artifact_path": "docs/enhanced/modules/module-package-llm.md",
+                        },
+                    },
+                    {
+                        "entity_kind": "file",
+                        "entity_id": "src/docgen/ui_server.py",
+                        "title": "ui_server.py",
+                        "subtitle": "src/docgen/ui_server.py",
+                        "module_name": "llm",
+                        "path": "src/docgen/ui_server.py",
+                        "search_text": "src/docgen/ui_server.py ui_server.py local ui server",
+                        "type": "source",
+                        "role": None,
+                        "verification_verdict": None,
+                        "run_kind": None,
+                        "run_id": None,
+                        "problem_type": None,
+                        "severity": None,
+                        "links": {
+                            "ui_path": "/file?path=docs/generated/files/file-src-docgen-llm-config-py.md",
+                            "artifact_path": "docs/generated/files/file-src-docgen-llm-config-py.md",
+                        },
+                    },
+                    {
+                        "entity_kind": "function",
+                        "entity_id": "docgen.ui_server.serve_ui",
+                        "title": "serve_ui",
+                        "subtitle": "src/docgen/ui_server.py",
+                        "module_name": "llm",
+                        "path": "src/docgen/ui_server.py",
+                        "search_text": "serve_ui docgen.ui_server.serve_ui",
+                        "type": "function",
+                        "role": None,
+                        "verification_verdict": None,
+                        "run_kind": None,
+                        "run_id": None,
+                        "problem_type": None,
+                        "severity": None,
+                        "links": {
+                            "ui_path": "/file?path=docs/generated/files/file-src-docgen-llm-config-py.md",
+                            "artifact_path": "docs/generated/files/file-src-docgen-llm-config-py.md",
+                        },
+                    },
+                    {
+                        "entity_kind": "verification_run",
+                        "entity_id": "verification-run",
+                        "title": "verification-run",
+                        "subtitle": "verification run",
+                        "module_name": None,
+                        "path": "docs/enhanced/history/verification/verification-run.json",
+                        "search_text": "verification-run verification llm",
+                        "type": None,
+                        "role": None,
+                        "verification_verdict": None,
+                        "run_kind": "verification",
+                        "run_id": "verification-run",
+                        "problem_type": None,
+                        "severity": None,
+                        "links": {
+                            "ui_path": "/history/verification/verification-run",
+                            "artifact_path": "docs/enhanced/history/verification/verification-run.json",
+                        },
+                    },
+                    {
+                        "entity_kind": "problem",
+                        "entity_id": "llm:weak_claim",
+                        "title": "llm weak_claim",
+                        "subtitle": "It needs factual support.",
+                        "module_name": "llm",
+                        "path": "docs/enhanced/verification/module-package-llm.verification.json",
+                        "search_text": "llm weak_claim warning The LLM claim is weak.",
+                        "type": None,
+                        "role": None,
+                        "verification_verdict": None,
+                        "run_kind": None,
+                        "run_id": None,
+                        "problem_type": "weak_claim",
+                        "severity": "warning",
+                        "links": {
+                            "ui_path": "/problems?module=llm&type=weak_claim",
+                            "artifact_path": "docs/enhanced/verification/module-package-llm.verification.json",
+                        },
+                    },
                 ],
                 "warnings": [],
             },
@@ -386,9 +640,18 @@ class UiServerCliTests(unittest.TestCase):
         problems_by_module = urlopen(base_url + "/problems?module=llm").read().decode("utf-8")
         problems_by_type = urlopen(base_url + "/problems?type=weak_claim").read().decode("utf-8")
         problems_by_severity = urlopen(base_url + "/problems?severity=warning").read().decode("utf-8")
+        search = urlopen(base_url + "/search?q=llm").read().decode("utf-8")
+        file_search = urlopen(base_url + "/search?q=ui_server.py&kind=file").read().decode("utf-8")
+        function_search = urlopen(base_url + "/search?q=serve_ui&kind=function").read().decode("utf-8")
+        verdict_search = urlopen(base_url + "/search?kind=module&verdict=warning").read().decode("utf-8")
+        role_search = urlopen(base_url + "/search?kind=module&role=detailed").read().decode("utf-8")
+        severity_search = urlopen(base_url + "/search?kind=problem&severity=warning").read().decode("utf-8")
+        run_search = urlopen(base_url + "/search?run_kind=verification").read().decode("utf-8")
+        no_results = urlopen(base_url + "/search?q=not-present").read().decode("utf-8")
         current_state = json.load(urlopen(base_url + "/ui-data/current-state.json"))
 
         self.assertIn("Project Inspector", home)
+        self.assertIn('action="/search"', home)
         self.assertIn("generation-run", home)
         self.assertIn("/problems", home)
         self.assertIn("/history", home)
@@ -428,9 +691,19 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Active filters: module=llm", problems_by_module)
         self.assertIn("The LLM claim is weak.", problems_by_type)
         self.assertIn("Active filters: severity=warning", problems_by_severity)
+        self.assertIn("Search / Поиск", search)
+        self.assertIn("Results count", search)
+        self.assertIn("/module/llm", search)
+        self.assertIn("ui_server.py", file_search)
+        self.assertIn("serve_ui", function_search)
+        self.assertIn("verdict: warning", verdict_search)
+        self.assertIn("role: detailed", role_search)
+        self.assertIn("weak_claim", severity_search)
+        self.assertIn("verification-run", run_search)
+        self.assertIn("No search results", no_results)
         self.assertEqual(current_state["latest_generation_run"]["run_id"], "generation-run")
-        self.assertNotIn("https://", home + modules + module + problems)
-        self.assertNotIn("cdn", (home + modules + module + problems).lower())
+        self.assertNotIn("https://", home + modules + module + problems + search)
+        self.assertNotIn("cdn", (home + modules + module + problems + search).lower())
 
     def test_history_and_file_routes_are_served(self) -> None:
         root = self.make_temp_dir()
@@ -440,6 +713,13 @@ class UiServerCliTests(unittest.TestCase):
         history = urlopen(base_url + "/history").read().decode("utf-8")
         generation_run = urlopen(base_url + "/history/generation/generation-run").read().decode("utf-8")
         run = urlopen(base_url + "/history/verification/verification-run").read().decode("utf-8")
+        compare = urlopen(base_url + "/compare").read().decode("utf-8")
+        generation_compare = urlopen(
+            base_url + "/compare/generation?run_a=generation-run-prev&run_b=generation-run"
+        ).read().decode("utf-8")
+        verification_compare = urlopen(
+            base_url + "/compare/verification?run_a=verification-run-prev&run_b=verification-run"
+        ).read().decode("utf-8")
         file_page = urlopen(
             base_url + "/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md"
         ).read().decode("utf-8")
@@ -459,6 +739,19 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("warning", run)
         self.assertIn("/module/llm", run)
         self.assertIn("/artifact?path=", run)
+        self.assertIn("Compare / Сравнение", compare)
+        self.assertIn("Compare latest two generation runs", compare)
+        self.assertIn("Generation Compare", generation_compare)
+        self.assertIn("changed", generation_compare)
+        self.assertIn("usage.total_tokens", generation_compare)
+        self.assertIn("/module/llm", generation_compare)
+        self.assertIn("/history/generation/generation-run", generation_compare)
+        self.assertIn("Verification Compare", verification_compare)
+        self.assertIn("verdict", verification_compare.lower())
+        self.assertIn("improved", verification_compare)
+        self.assertIn("weak -1", verification_compare)
+        self.assertIn("/module/llm", verification_compare)
+        self.assertIn("/history/verification/verification-run", verification_compare)
         self.assertIn("File config", file_page)
         self.assertIn("Related Modules", file_page)
         self.assertIn("Artifact", artifact_page)
@@ -472,6 +765,10 @@ class UiServerCliTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             urlopen(base_url + "/history/generation/missing-run")
         self.assertEqual(raised.exception.code, 404)
+
+        with self.assertRaises(HTTPError) as compare_raised:
+            urlopen(base_url + "/compare/generation?run_a=missing-run&run_b=generation-run")
+        self.assertEqual(compare_raised.exception.code, 404)
 
         self.write_json(
             ui_data / "history-runs.json",
@@ -536,6 +833,9 @@ class UiServerCliTests(unittest.TestCase):
             ui_data / "history-index.json",
             ui_data / "history-runs.json",
             ui_data / "problems-index.json",
+            ui_data / "files-index.json",
+            ui_data / "functions-index.json",
+            ui_data / "search-index.json",
             generated / "modules" / "module-package-llm.md",
             enhanced / "modules" / "module-package-llm.md",
         ]
@@ -546,6 +846,9 @@ class UiServerCliTests(unittest.TestCase):
         urlopen(base_url + "/modules").read()
         urlopen(base_url + "/module/llm").read()
         urlopen(base_url + "/problems").read()
+        urlopen(base_url + "/search?q=llm").read()
+        urlopen(base_url + "/compare").read()
+        urlopen(base_url + "/compare/generation?run_a=generation-run-prev&run_b=generation-run").read()
         urlopen(base_url + "/ui-data/current-state.json").read()
 
         after = {path: path.read_text(encoding="utf-8") for path in tracked_files}
