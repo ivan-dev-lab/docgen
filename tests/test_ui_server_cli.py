@@ -69,7 +69,17 @@ class UiServerCliTests(unittest.TestCase):
                 "verifier_status": "ok",
                 "structured_output_valid": True,
                 "verdict": "warning",
-                "weak_claims": [{}],
+                "weak_claims": [
+                    {
+                        "section": "Overview",
+                        "claim_text": "The LLM claim is weak.",
+                        "reason": "It needs factual support.",
+                        "suggested_rewrite": "Make the claim narrower.",
+                    }
+                ],
+                "unsupported_claims": [],
+                "missing_uncertainty": [],
+                "missing_factual_support": [],
             },
         )
 
@@ -268,7 +278,58 @@ class UiServerCliTests(unittest.TestCase):
                     "modules_index": "docs/ui-data/modules-index.json",
                     "history_index": "docs/ui-data/history-index.json",
                     "history_runs": "docs/ui-data/history-runs.json",
+                    "problems_index": "docs/ui-data/problems-index.json",
                 },
+                "warnings": [],
+            },
+        )
+        self.write_json(
+            ui_data / "problems-index.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-04-28T00:01:00+00:00",
+                "status": "ok",
+                "summary": {
+                    "modules_with_warnings": 1,
+                    "modules_with_failures": 0,
+                    "modules_missing_enhanced": 0,
+                    "modules_missing_verification": 0,
+                    "weak_claims_total": 1,
+                    "unsupported_claims_total": 0,
+                    "missing_factual_support_total": 0,
+                    "missing_uncertainty_total": 0,
+                },
+                "module_problems": [
+                    {
+                        "module": "llm",
+                        "severity": "warning",
+                        "problem_types": ["verification_warning"],
+                        "verification_verdict": "warning",
+                        "weak_claims_count": 1,
+                        "unsupported_claims_count": 0,
+                        "missing_factual_support_count": 0,
+                        "missing_uncertainty_count": 0,
+                        "enhanced_present": True,
+                        "verification_present": True,
+                        "module_path": "/module/llm",
+                        "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
+                        "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
+                    }
+                ],
+                "issue_problems": [
+                    {
+                        "module": "llm",
+                        "issue_type": "weak_claim",
+                        "severity": "warning",
+                        "section": "Overview",
+                        "reason": "It needs factual support.",
+                        "claim_text": "The LLM claim is weak.",
+                        "suggested_rewrite": "Make the claim narrower.",
+                        "module_path": "/module/llm",
+                        "verification_json_path": "docs/enhanced/verification/module-package-llm.verification.json",
+                        "verification_summary_path": "docs/enhanced/verification/module-package-llm.verification.md",
+                    }
+                ],
                 "warnings": [],
             },
         )
@@ -321,10 +382,15 @@ class UiServerCliTests(unittest.TestCase):
         home = urlopen(base_url + "/").read().decode("utf-8")
         modules = urlopen(base_url + "/modules").read().decode("utf-8")
         module = urlopen(base_url + "/module/llm").read().decode("utf-8")
+        problems = urlopen(base_url + "/problems").read().decode("utf-8")
+        problems_by_module = urlopen(base_url + "/problems?module=llm").read().decode("utf-8")
+        problems_by_type = urlopen(base_url + "/problems?type=weak_claim").read().decode("utf-8")
+        problems_by_severity = urlopen(base_url + "/problems?severity=warning").read().decode("utf-8")
         current_state = json.load(urlopen(base_url + "/ui-data/current-state.json"))
 
         self.assertIn("Project Inspector", home)
         self.assertIn("generation-run", home)
+        self.assertIn("/problems", home)
         self.assertIn("/history", home)
         self.assertIn("#warning-modules", home)
         self.assertIn("#missing-enhanced", home)
@@ -333,6 +399,8 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Verification warning", home)
         self.assertIn("/module/llm", modules)
         self.assertIn("Module Summary", module)
+        self.assertIn("Problems", module)
+        self.assertIn("/problems?module=llm", module)
         self.assertIn("Обзор", module)
         self.assertIn("Факты", module)
         self.assertIn("ИИ-объяснение", module)
@@ -351,9 +419,18 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("/history/generation/generation-run", module)
         self.assertIn("Factual layer text", module)
         self.assertIn("Enhanced explanation.", module)
+        self.assertIn("Problems / Проблемы", problems)
+        self.assertIn("Module-level problems", problems)
+        self.assertIn("Issue-level problems", problems)
+        self.assertIn("weak_claim", problems)
+        self.assertIn("/module/llm", problems)
+        self.assertIn("/artifact?path=", problems)
+        self.assertIn("Active filters: module=llm", problems_by_module)
+        self.assertIn("The LLM claim is weak.", problems_by_type)
+        self.assertIn("Active filters: severity=warning", problems_by_severity)
         self.assertEqual(current_state["latest_generation_run"]["run_id"], "generation-run")
-        self.assertNotIn("https://", home + modules + module)
-        self.assertNotIn("cdn", (home + modules + module).lower())
+        self.assertNotIn("https://", home + modules + module + problems)
+        self.assertNotIn("cdn", (home + modules + module + problems).lower())
 
     def test_history_and_file_routes_are_served(self) -> None:
         root = self.make_temp_dir()
@@ -414,6 +491,42 @@ class UiServerCliTests(unittest.TestCase):
         empty_history = urlopen(f"http://127.0.0.1:{empty_server.server_port}/history").read().decode("utf-8")
         self.assertIn("no history runs", empty_history)
 
+    def test_problems_no_data_and_no_problems_are_distinct(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        self.write_json(
+            ui_data / "problems-index.json",
+            {
+                "schema_version": "1.0",
+                "status": "no_data",
+                "summary": {},
+                "module_problems": [],
+                "issue_problems": [],
+                "warnings": [],
+            },
+        )
+        no_data_base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+        no_data_page = urlopen(no_data_base_url + "/problems").read().decode("utf-8")
+        self.assertIn("Недостаточно данных", no_data_page)
+
+        root_ok = self.make_temp_dir()
+        generated_ok, enhanced_ok, ui_data_ok = self.build_fixture(root_ok)
+        self.write_json(
+            ui_data_ok / "problems-index.json",
+            {
+                "schema_version": "1.0",
+                "status": "ok",
+                "summary": {},
+                "module_problems": [],
+                "issue_problems": [],
+                "warnings": [],
+            },
+        )
+        ok_base_url, _ok_server, _ok_thread = self.start_server(generated_ok, enhanced_ok, ui_data_ok)
+        ok_page = urlopen(ok_base_url + "/problems").read().decode("utf-8")
+        self.assertIn("Проблем не найдено", ok_page)
+        self.assertNotEqual(no_data_page, ok_page)
+
     def test_server_is_read_only_for_artifacts(self) -> None:
         root = self.make_temp_dir()
         generated, enhanced, ui_data = self.build_fixture(root)
@@ -422,6 +535,7 @@ class UiServerCliTests(unittest.TestCase):
             ui_data / "modules-index.json",
             ui_data / "history-index.json",
             ui_data / "history-runs.json",
+            ui_data / "problems-index.json",
             generated / "modules" / "module-package-llm.md",
             enhanced / "modules" / "module-package-llm.md",
         ]
@@ -431,6 +545,7 @@ class UiServerCliTests(unittest.TestCase):
         urlopen(base_url + "/").read()
         urlopen(base_url + "/modules").read()
         urlopen(base_url + "/module/llm").read()
+        urlopen(base_url + "/problems").read()
         urlopen(base_url + "/ui-data/current-state.json").read()
 
         after = {path: path.read_text(encoding="utf-8") for path in tracked_files}

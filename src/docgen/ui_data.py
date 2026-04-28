@@ -10,6 +10,7 @@ CURRENT_STATE_FILENAME = "current-state.json"
 MODULES_INDEX_FILENAME = "modules-index.json"
 HISTORY_INDEX_FILENAME = "history-index.json"
 HISTORY_RUNS_FILENAME = "history-runs.json"
+PROBLEMS_INDEX_FILENAME = "problems-index.json"
 UI_DATA_MANIFEST_FILENAME = "ui-data-manifest.json"
 
 
@@ -77,6 +78,12 @@ def build_ui_data(
         generated_at=generated_at,
         warnings=warnings,
     )
+    problems_index = build_problems_index(
+        modules=modules["modules"],
+        reports_by_module=reports_by_module,
+        generated_at=generated_at,
+        warnings=warnings,
+    )
     current_state = build_current_state(
         sources=sources,
         generated_at=generated_at,
@@ -98,6 +105,7 @@ def build_ui_data(
         "modules_index": modules,
         "history_index": history_index,
         "history_runs": history_runs,
+        "problems_index": problems_index,
         "ui_data_manifest": ui_manifest,
     }
     if not dry_run:
@@ -319,6 +327,7 @@ def build_ui_data_manifest(
             "modules_index": normalize_path(output_root / MODULES_INDEX_FILENAME),
             "history_index": normalize_path(output_root / HISTORY_INDEX_FILENAME),
             "history_runs": normalize_path(output_root / HISTORY_RUNS_FILENAME),
+            "problems_index": normalize_path(output_root / PROBLEMS_INDEX_FILENAME),
         },
         "sources": {name: normalize_path(path) for name, path in sources.items()},
         "warnings": warnings,
@@ -351,6 +360,152 @@ def build_history_runs(
         "verification_runs": verification_runs,
         "warnings": warnings,
     }
+
+
+def build_problems_index(
+    *,
+    modules: list[dict[str, Any]],
+    reports_by_module: dict[str, dict[str, Any]],
+    generated_at: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    module_problems = []
+    issue_problems = []
+    for module in modules:
+        if not isinstance(module, dict):
+            continue
+        module_problem = build_module_problem(module)
+        if module_problem:
+            module_problems.append(module_problem)
+        report = reports_by_module.get(str(module.get("name") or ""))
+        issue_problems.extend(build_issue_problems(module, report))
+
+    summary = {
+        "modules_with_warnings": sum(1 for problem in module_problems if "verification_warning" in problem["problem_types"]),
+        "modules_with_failures": sum(1 for problem in module_problems if "verification_fail" in problem["problem_types"]),
+        "modules_missing_enhanced": sum(1 for problem in module_problems if "missing_enhanced" in problem["problem_types"]),
+        "modules_missing_verification": sum(1 for problem in module_problems if "missing_verification" in problem["problem_types"]),
+        "weak_claims_total": sum(int_value(nested_dict(module, "verification").get("weak_claims_count")) for module in modules),
+        "unsupported_claims_total": sum(
+            int_value(nested_dict(module, "verification").get("unsupported_claims_count")) for module in modules
+        ),
+        "missing_factual_support_total": sum(
+            int_value(nested_dict(module, "verification").get("missing_factual_support_count")) for module in modules
+        ),
+        "missing_uncertainty_total": sum(
+            int_value(nested_dict(module, "verification").get("missing_uncertainty_count")) for module in modules
+        ),
+    }
+    verified_count = sum(1 for module in modules if nested_dict(module, "verification").get("present"))
+    if not modules or verified_count == 0:
+        status = "no_data"
+    elif verified_count < len(modules):
+        status = "partial"
+    else:
+        status = "ok"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "status": status,
+        "summary": summary,
+        "module_problems": sorted(module_problems, key=problem_sort_key),
+        "issue_problems": sorted(issue_problems, key=issue_problem_sort_key),
+        "warnings": warnings,
+    }
+
+
+def build_module_problem(module: dict[str, Any]) -> dict[str, Any] | None:
+    name = str(module.get("name") or "")
+    enhanced = nested_dict(module, "enhanced")
+    verification = nested_dict(module, "verification")
+    problem_types = []
+    verdict = normalize_verdict(verification.get("verdict"))
+    if verdict == "warning":
+        problem_types.append("verification_warning")
+    elif verdict == "fail":
+        problem_types.append("verification_fail")
+    if not enhanced.get("present"):
+        problem_types.append("missing_enhanced")
+    if not verification.get("present"):
+        problem_types.append("missing_verification")
+    if not problem_types:
+        return None
+    severity = "fail" if "verification_fail" in problem_types else "warning" if "verification_warning" in problem_types else "info"
+    return {
+        "module": name,
+        "severity": severity,
+        "problem_types": problem_types,
+        "verification_verdict": verdict,
+        "weak_claims_count": int_value(verification.get("weak_claims_count")),
+        "unsupported_claims_count": int_value(verification.get("unsupported_claims_count")),
+        "missing_factual_support_count": int_value(verification.get("missing_factual_support_count")),
+        "missing_uncertainty_count": int_value(verification.get("missing_uncertainty_count")),
+        "enhanced_present": bool(enhanced.get("present")),
+        "verification_present": bool(verification.get("present")),
+        "module_path": f"/module/{name}",
+        "verification_json_path": verification.get("json_path"),
+        "verification_summary_path": verification.get("summary_path"),
+    }
+
+
+def build_issue_problems(module: dict[str, Any], report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(report, dict):
+        return []
+    name = str(module.get("name") or report.get("module") or "")
+    verification = nested_dict(module, "verification")
+    definitions = [
+        ("weak_claim", "weak_claims", "warning"),
+        ("unsupported_claim", "unsupported_claims", "fail"),
+        ("missing_factual_support", "missing_factual_support", "fail"),
+        ("missing_uncertainty", "missing_uncertainty", "warning"),
+    ]
+    problems = []
+    for issue_type, report_key, severity in definitions:
+        for item in list_value(report.get(report_key)):
+            if not isinstance(item, dict):
+                item = {"reason": str(item)}
+            problems.append(
+                {
+                    "module": name,
+                    "issue_type": issue_type,
+                    "severity": severity,
+                    "section": text_from(item, "section", "where", "location"),
+                    "reason": text_from(item, "reason", "why", "explanation", "issue"),
+                    "claim_text": text_from(item, "claim_text", "claim", "text", "statement"),
+                    "suggested_rewrite": text_from(item, "suggested_rewrite", "suggested_fix", "rewrite", "fix"),
+                    "module_path": f"/module/{name}",
+                    "verification_json_path": verification.get("json_path"),
+                    "verification_summary_path": verification.get("summary_path"),
+                }
+            )
+    return problems
+
+
+def nested_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    value = payload.get(key) if isinstance(payload, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def text_from(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def problem_sort_key(problem: dict[str, Any]) -> tuple[int, str]:
+    severity_order = {"fail": 0, "warning": 1, "info": 2}
+    return (severity_order.get(str(problem.get("severity") or ""), 3), str(problem.get("module") or ""))
+
+
+def issue_problem_sort_key(problem: dict[str, Any]) -> tuple[int, str, str]:
+    severity_order = {"fail": 0, "warning": 1, "info": 2}
+    return (
+        severity_order.get(str(problem.get("severity") or ""), 3),
+        str(problem.get("module") or ""),
+        str(problem.get("issue_type") or ""),
+    )
 
 
 def build_history_run_detail(
@@ -849,6 +1004,7 @@ def write_outputs(output_root: Path, outputs: dict[str, dict[str, Any]]) -> None
     write_json(output_root / MODULES_INDEX_FILENAME, outputs["modules_index"])
     write_json(output_root / HISTORY_INDEX_FILENAME, outputs["history_index"])
     write_json(output_root / HISTORY_RUNS_FILENAME, outputs["history_runs"])
+    write_json(output_root / PROBLEMS_INDEX_FILENAME, outputs["problems_index"])
     write_json(output_root / UI_DATA_MANIFEST_FILENAME, outputs["ui_data_manifest"])
 
 

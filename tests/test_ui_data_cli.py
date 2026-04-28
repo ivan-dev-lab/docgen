@@ -207,9 +207,26 @@ class UiDataCliTests(unittest.TestCase):
                     "structured_output_valid": True,
                     "verdict": verdict,
                     "unsupported_claims": [],
-                    "weak_claims": [{}] if verdict == "warning" else [],
+                    "weak_claims": [
+                        {
+                            "section": "Usage",
+                            "claim_text": "Alpha claim is too broad.",
+                            "reason": "Needs a stronger source.",
+                            "suggested_rewrite": "Narrow the alpha claim.",
+                        }
+                    ]
+                    if verdict == "warning"
+                    else [],
                     "missing_uncertainty": [],
-                    "missing_factual_support": [],
+                    "missing_factual_support": [
+                        {
+                            "section": "Usage",
+                            "claim_text": "Alpha support is absent.",
+                            "reason": "No factual support cited.",
+                        }
+                    ]
+                    if verdict == "warning"
+                    else [],
                 },
             )
             (verification_root / f"module-package-{name}.verification.md").write_text(
@@ -355,6 +372,7 @@ class UiDataCliTests(unittest.TestCase):
             "modules-index.json",
             "history-index.json",
             "history-runs.json",
+            "problems-index.json",
             "ui-data-manifest.json",
         ):
             self.assertTrue((output / name).is_file(), msg=name)
@@ -382,6 +400,33 @@ class UiDataCliTests(unittest.TestCase):
         self.assertEqual(modules["alpha"]["verification"]["verification_status"], "verified_warning")
         self.assertEqual(modules["alpha"]["verification"]["verdict"], "warning")
         self.assertEqual(modules["alpha"]["verification"]["weak_claims_count"], 1)
+        self.assertEqual(modules["alpha"]["verification"]["missing_factual_support_count"], 1)
+
+    def test_problems_index_contains_module_and_issue_problems(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, output = self.build_fixture(root)
+        build_ui_data(generated, enhanced, output)
+
+        problems = json.loads((output / "problems-index.json").read_text(encoding="utf-8"))
+        module_problem_types = {
+            problem["module"]: set(problem["problem_types"]) for problem in problems["module_problems"]
+        }
+        issue_types = {(problem["module"], problem["issue_type"]) for problem in problems["issue_problems"]}
+
+        self.assertEqual(problems["status"], "partial")
+        self.assertEqual(problems["summary"]["modules_with_warnings"], 1)
+        self.assertEqual(problems["summary"]["modules_missing_enhanced"], 1)
+        self.assertEqual(problems["summary"]["modules_missing_verification"], 1)
+        self.assertEqual(problems["summary"]["weak_claims_total"], 1)
+        self.assertEqual(problems["summary"]["missing_factual_support_total"], 1)
+        self.assertIn("verification_warning", module_problem_types["alpha"])
+        self.assertIn("missing_enhanced", module_problem_types["missing"])
+        self.assertIn("missing_verification", module_problem_types["missing"])
+        self.assertIn(("alpha", "weak_claim"), issue_types)
+        self.assertIn(("alpha", "missing_factual_support"), issue_types)
+        first_issue = problems["issue_problems"][0]
+        self.assertEqual(first_issue["module_path"], "/module/alpha")
+        self.assertIn("verification_json_path", first_issue)
 
     def test_history_index_uses_history_indexes_and_paths_are_forward_slash(self) -> None:
         root = self.make_temp_dir()

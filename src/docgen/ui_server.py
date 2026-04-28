@@ -18,6 +18,9 @@ REQUIRED_UI_DATA_FILES = {
     "history_runs": "history-runs.json",
     "ui_data_manifest": "ui-data-manifest.json",
 }
+OPTIONAL_UI_DATA_FILES = {
+    "problems_index": "problems-index.json",
+}
 DISPLAY_TEXT_LIMIT = 200_000
 
 
@@ -36,6 +39,7 @@ class UiDataBundle:
     modules_index: dict[str, Any]
     history_index: dict[str, Any]
     history_runs: dict[str, Any]
+    problems_index: dict[str, Any]
     ui_data_manifest: dict[str, Any]
     warnings: list[str]
 
@@ -132,11 +136,19 @@ def load_ui_data(config: UiServerConfig) -> UiDataBundle:
             warnings.append(message)
             payload = {}
         payloads[key] = payload
+    for key, filename in OPTIONAL_UI_DATA_FILES.items():
+        path = config.ui_data_root / filename
+        payload = load_json(path)
+        if payload is None:
+            warnings.append(f"Missing optional UI data file: {normalize_path(path, config.project_root)}")
+            payload = {}
+        payloads[key] = payload
     return UiDataBundle(
         current_state=payloads["current_state"],
         modules_index=payloads["modules_index"],
         history_index=payloads["history_index"],
         history_runs=payloads["history_runs"],
+        problems_index=payloads["problems_index"],
         ui_data_manifest=payloads["ui_data_manifest"],
         warnings=warnings,
     )
@@ -164,6 +176,7 @@ def server_summary(
             "/",
             "/modules",
             "/module/{name}",
+            "/problems",
             "/history",
             "/history/generation/{run_id}",
             "/history/verification/{run_id}",
@@ -190,6 +203,8 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
                 self.send_html(render_modules(self.server.config, self.server.data))
             elif path.startswith("/module/"):
                 self.send_html(render_module(unquote(path.removeprefix("/module/")), self.server.config, self.server.data))
+            elif path == "/problems":
+                self.send_html(render_problems(parsed.query, self.server.config, self.server.data))
             elif path == "/history":
                 self.send_html(render_history(self.server.config, self.server.data))
             elif path.startswith("/history/"):
@@ -217,7 +232,8 @@ class DocgenUiRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
         path = self.server.config.ui_data_root / relative
-        if path.name not in set(REQUIRED_UI_DATA_FILES.values()) or not path.is_file():
+        allowed_files = set(REQUIRED_UI_DATA_FILES.values()) | set(OPTIONAL_UI_DATA_FILES.values())
+        if path.name not in allowed_files or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
         content_type = mimetypes.guess_type(path.name)[0] or "application/json"
@@ -257,6 +273,7 @@ def render_home(config: UiServerConfig, data: UiDataBundle) -> str:
         '<section class="panel home-overview"><h2>Current operational state</h2>',
         '<div class="quick-links">',
         '<a class="button" href="/modules">All modules</a>',
+        '<a class="button" href="/problems">Problems</a>',
         '<a class="button" href="/history">Run history</a>',
         '<a class="button" href="#warning-modules">Warning or failed modules</a>',
         '<a class="button" href="#missing-enhanced">Missing enhanced</a>',
@@ -323,6 +340,7 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
     content = [
         page_header(str(module.get("name") or "Module"), "Entity-first module view."),
         render_module_summary(module, enhanced, verification),
+        render_module_problems_summary(str(module.get("name") or ""), data.problems_index),
         '<nav class="section-nav" aria-label="Module sections">',
         '<a href="#overview">Обзор</a>',
         '<a href="#facts">Факты</a>',
@@ -396,6 +414,49 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
         "</section>",
     ]
     return layout(str(module.get("name") or "Module"), "\n".join(content), data)
+
+
+def render_problems(query: str, config: UiServerConfig, data: UiDataBundle) -> str:
+    params = parse_qs(query)
+    filters = {
+        "severity": first_query_value(params, "severity"),
+        "type": first_query_value(params, "type"),
+        "module": first_query_value(params, "module"),
+    }
+    index = data.problems_index if isinstance(data.problems_index, dict) else {}
+    summary = index.get("summary") if isinstance(index.get("summary"), dict) else {}
+    module_problems = [
+        problem
+        for problem in list_value(index.get("module_problems"))
+        if isinstance(problem, dict) and problem_matches_filters(problem, filters, module_level=True)
+    ]
+    issue_problems = [
+        problem
+        for problem in list_value(index.get("issue_problems"))
+        if isinstance(problem, dict) and problem_matches_filters(problem, filters, module_level=False)
+    ]
+    content = [
+        page_header("Problems / Проблемы", "Issue-first read-only view built from machine-readable verification data."),
+        render_problem_state_message(index, module_problems, issue_problems, filters),
+        render_problem_filters(filters),
+        '<section class="metrics">',
+        metric("Modules with warnings", summary.get("modules_with_warnings", 0)),
+        metric("Modules with failures", summary.get("modules_with_failures", 0)),
+        metric("Missing enhanced", summary.get("modules_missing_enhanced", 0)),
+        metric("Missing verification", summary.get("modules_missing_verification", 0)),
+        metric("Weak claims", summary.get("weak_claims_total", 0)),
+        metric("Unsupported claims", summary.get("unsupported_claims_total", 0)),
+        metric("Missing factual support", summary.get("missing_factual_support_total", 0)),
+        metric("Missing uncertainty", summary.get("missing_uncertainty_total", 0)),
+        "</section>",
+        '<section class="panel"><h2>Module-level problems</h2>',
+        render_module_problems_table(module_problems),
+        "</section>",
+        '<section class="panel"><h2>Issue-level problems</h2>',
+        render_issue_problems_table(issue_problems),
+        "</section>",
+    ]
+    return layout("Problems", "\n".join(content), data)
 
 
 def render_history(config: UiServerConfig, data: UiDataBundle) -> str:
@@ -481,7 +542,7 @@ def layout(title: str, content: str, data: UiDataBundle) -> str:
         '<link rel="stylesheet" href="/static/style.css">'
         "</head><body>"
         '<header class="topbar"><a class="brand" href="/">Docgen UI</a>'
-        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/history">History</a>'
+        '<nav><a href="/">Home</a><a href="/modules">Modules</a><a href="/problems">Problems</a><a href="/history">History</a>'
         '<a href="/ui-data/current-state.json">current-state.json</a></nav></header>'
         f"<main>{warning_html}{content}</main>"
         "</body></html>"
@@ -536,6 +597,185 @@ def render_home_module_section(title: str, anchor: str, modules: list[dict[str, 
             f"<tbody>{''.join(rows)}</tbody></table></div>"
         )
     return f'<section id="{esc(anchor)}" class="panel"><h2>{esc(title)}</h2>{body}</section>'
+
+
+def render_problem_state_message(
+    index: dict[str, Any],
+    module_problems: list[dict[str, Any]],
+    issue_problems: list[dict[str, Any]],
+    filters: dict[str, str | None],
+) -> str:
+    status = str(index.get("status") or "no_data")
+    filtered = any(filters.values())
+    if status == "no_data":
+        return '<div class="warning">Недостаточно данных для problem analysis.</div>'
+    if status == "partial":
+        return '<div class="notice">Problem analysis is partial because some enhanced or verification artifacts are missing.</div>'
+    if not filtered and not module_problems and not issue_problems:
+        return '<div class="notice ok-state">Проблем не найдено.</div>'
+    if filtered and not module_problems and not issue_problems:
+        return '<div class="notice muted">No problems match the active filters.</div>'
+    return ""
+
+
+def render_problem_filters(filters: dict[str, str | None]) -> str:
+    active = [f"{key}={value}" for key, value in filters.items() if value]
+    active_text = ", ".join(active) if active else "none"
+    links = [
+        ("All", "/problems"),
+        ("Warnings", "/problems?severity=warning"),
+        ("Failures", "/problems?severity=fail"),
+        ("Weak claims", "/problems?type=weak_claim"),
+        ("Unsupported claims", "/problems?type=unsupported_claim"),
+        ("Missing support", "/problems?type=missing_factual_support"),
+        ("Missing uncertainty", "/problems?type=missing_uncertainty"),
+        ("Missing enhanced", "/problems?type=missing_enhanced"),
+        ("Missing verification", "/problems?type=missing_verification"),
+    ]
+    return (
+        '<section class="panel problem-filters"><h2>Filters</h2>'
+        f'<p class="muted">Active filters: {esc(active_text)}</p>'
+        '<div class="quick-links">'
+        + "".join(f'<a class="button" href="{esc(url)}">{esc(label)}</a>' for label, url in links)
+        + "</div></section>"
+    )
+
+
+def render_module_problems_table(problems: list[dict[str, Any]]) -> str:
+    if not problems:
+        return '<p class="muted">No module-level problems.</p>'
+    rows = []
+    for problem in problems:
+        module = problem.get("module")
+        artifacts = [
+            artifact_link(problem.get("verification_json_path"), "verification JSON"),
+            artifact_link(problem.get("verification_summary_path"), "summary"),
+        ]
+        rows.append(
+            "<tr>"
+            f"<td>{module_name_link(module)}</td>"
+            f"<td>{status_badge(problem.get('severity'))}</td>"
+            f"<td>{esc(', '.join(str(item) for item in list_value(problem.get('problem_types'))))}</td>"
+            f"<td>{verdict_badge(problem.get('verification_verdict'), None)}</td>"
+            f"<td>{esc(problem_issue_counts(problem))}</td>"
+            f"<td>{'<br>'.join(artifacts)}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table>'
+        "<thead><tr><th>Module</th><th>Severity</th><th>Problem types</th><th>Verdict</th><th>Issue counts</th><th>Details</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_issue_problems_table(problems: list[dict[str, Any]]) -> str:
+    if not problems:
+        return '<p class="muted">No issue-level problems.</p>'
+    rows = []
+    for problem in problems:
+        artifacts = [
+            artifact_link(problem.get("verification_json_path"), "verification JSON"),
+            artifact_link(problem.get("verification_summary_path"), "summary"),
+        ]
+        rows.append(
+            "<tr>"
+            f"<td>{module_name_link(problem.get('module'))}</td>"
+            f"<td>{status_badge(problem.get('severity'))}</td>"
+            f"<td>{esc(problem.get('issue_type'))}</td>"
+            f"<td>{esc(problem.get('section'))}</td>"
+            f"<td>{esc(problem.get('claim_text'))}</td>"
+            f"<td>{esc(problem.get('reason'))}</td>"
+            f"<td>{esc(problem.get('suggested_rewrite'))}</td>"
+            f"<td>{'<br>'.join(artifacts)}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table>'
+        "<thead><tr><th>Module</th><th>Severity</th><th>Type</th><th>Section</th><th>Claim</th><th>Reason</th><th>Suggested rewrite</th><th>Details</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_module_problems_summary(module_name: str, problems_index: dict[str, Any]) -> str:
+    if not isinstance(problems_index, dict) or not problems_index:
+        return (
+            '<section class="panel module-problems"><h2>Problems</h2>'
+            '<p class="muted">Недостаточно данных для problem analysis.</p></section>'
+        )
+    module_problems = [
+        problem
+        for problem in list_value(problems_index.get("module_problems"))
+        if isinstance(problem, dict) and problem.get("module") == module_name
+    ]
+    issue_problems = [
+        problem
+        for problem in list_value(problems_index.get("issue_problems"))
+        if isinstance(problem, dict) and problem.get("module") == module_name
+    ]
+    if problems_index.get("status") == "no_data":
+        body = '<p class="muted">Недостаточно данных для problem analysis.</p>'
+    elif not module_problems and not issue_problems:
+        body = '<p class="muted">Проблем не найдено.</p>'
+    else:
+        summary = module_problems[0] if module_problems else {}
+        counts = summary if summary else count_issue_problems(issue_problems)
+        body = (
+            '<div class="summary-grid compact">'
+            + summary_item("Weak claims", counts.get("weak_claims_count", 0))
+            + summary_item("Unsupported claims", counts.get("unsupported_claims_count", 0))
+            + summary_item("Missing factual support", counts.get("missing_factual_support_count", 0))
+            + summary_item("Missing uncertainty", counts.get("missing_uncertainty_count", 0))
+            + "</div>"
+            f'<p><a class="button" href="/problems?module={quote(module_name, safe="")}">Open module problems</a></p>'
+        )
+    return f'<section class="panel module-problems"><h2>Problems</h2>{body}</section>'
+
+
+def problem_matches_filters(problem: dict[str, Any], filters: dict[str, str | None], *, module_level: bool) -> bool:
+    if filters.get("module") and str(problem.get("module") or "") != filters["module"]:
+        return False
+    if filters.get("severity") and str(problem.get("severity") or "") != filters["severity"]:
+        return False
+    requested_type = filters.get("type")
+    if requested_type:
+        if module_level:
+            return requested_type in {str(item) for item in list_value(problem.get("problem_types"))}
+        return str(problem.get("issue_type") or "") == requested_type
+    return True
+
+
+def count_issue_problems(problems: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {
+        "weak_claims_count": 0,
+        "unsupported_claims_count": 0,
+        "missing_factual_support_count": 0,
+        "missing_uncertainty_count": 0,
+    }
+    for problem in problems:
+        issue_type = problem.get("issue_type")
+        if issue_type == "weak_claim":
+            counts["weak_claims_count"] += 1
+        elif issue_type == "unsupported_claim":
+            counts["unsupported_claims_count"] += 1
+        elif issue_type == "missing_factual_support":
+            counts["missing_factual_support_count"] += 1
+        elif issue_type == "missing_uncertainty":
+            counts["missing_uncertainty_count"] += 1
+    return counts
+
+
+def problem_issue_counts(problem: dict[str, Any]) -> str:
+    return (
+        f"weak: {int_value(problem.get('weak_claims_count'))}, "
+        f"unsupported: {int_value(problem.get('unsupported_claims_count'))}, "
+        f"support: {int_value(problem.get('missing_factual_support_count'))}, "
+        f"uncertainty: {int_value(problem.get('missing_uncertainty_count'))}"
+    )
+
+
+def first_query_value(params: dict[str, list[str]], key: str) -> str | None:
+    value = (params.get(key) or [None])[0]
+    return value if value not in (None, "") else None
 
 
 def render_module_summary(module: dict[str, Any], enhanced: dict[str, Any], verification: dict[str, Any]) -> str:
@@ -833,8 +1073,8 @@ def module_name_link(name: Any) -> str:
 
 def status_badge(status: Any) -> str:
     text = str(status or "unknown")
-    css = "fail" if "failed" in text or text.endswith("_fail") else "warn" if "warning" in text else "ok"
-    if text in {"unknown", "missing", "skipped_missing_enhanced"}:
+    css = "fail" if text == "fail" or "failed" in text or text.endswith("_fail") else "warn" if text == "warning" or "warning" in text else "ok"
+    if text in {"unknown", "missing", "info", "skipped_missing_enhanced"}:
         css = "neutral"
     return f'<span class="badge {css}">{esc(text)}</span>'
 
@@ -859,7 +1099,7 @@ def render_artifact_pre(path: str, config: UiServerConfig) -> str:
 
 
 def render_error(message: str) -> str:
-    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, {}, []))
+    return layout("Error", page_header("Error", message), UiDataBundle({}, {}, {}, {}, {}, {}, []))
 
 
 def definition_list(items: list[tuple[str, Any]], *, raw_labels: set[str] | None = None) -> str:
@@ -983,6 +1223,10 @@ def nested_text(payload: dict[str, Any], section: str, key: str) -> str:
 def nested_list(payload: dict[str, Any], section: str, key: str) -> list[Any]:
     section_payload = payload.get(section) if isinstance(payload.get(section), dict) else {}
     value = section_payload.get(key)
+    return value if isinstance(value, list) else []
+
+
+def list_value(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
