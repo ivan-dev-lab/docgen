@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import inspect
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from urllib.error import HTTPError
@@ -20,6 +21,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from docgen.cli import main  # noqa: E402
 from docgen.ui_content_contract import DISPLAY_CONTENT_FIELDS, FORBIDDEN_MARKDOWN_SEMANTIC_FIELDS  # noqa: E402
+import docgen.ui_server as ui_server  # noqa: E402
 from docgen.ui_server import build_server_config, create_ui_server, load_artifact_display_content  # noqa: E402
 
 
@@ -113,7 +115,20 @@ class UiServerCliTests(unittest.TestCase):
         generated_file.parent.mkdir(parents=True, exist_ok=True)
         enhanced_module.parent.mkdir(parents=True, exist_ok=True)
         verification_summary.parent.mkdir(parents=True, exist_ok=True)
-        generated_module.write_text("# Factual llm\n\nFactual layer text.\n", encoding="utf-8")
+        generated_module.write_text(
+            "# Factual llm\n\n"
+            "Factual layer text.\n\n"
+            "## Key files\n\n"
+            "| category | file |\n"
+            "| --- | --- |\n"
+            "| source_files | [config](../files/file-src-docgen-llm-config-py.md) |\n"
+            "| docs | [architecture](../architecture.md) |\n\n"
+            "## Key entities\n\n"
+            "| entity | file |\n"
+            "| --- | --- |\n"
+            "| Config | `src/docgen/llm/config.py` |\n",
+            encoding="utf-8",
+        )
         generated_file.write_text("# File config\n\nFile documentation.\n", encoding="utf-8")
         enhanced_module.write_text("# Enhanced llm\n\nEnhanced explanation.\n", encoding="utf-8")
         verification_summary.write_text("# Verification llm\n\nVerification summary.\n", encoding="utf-8")
@@ -704,6 +719,7 @@ class UiServerCliTests(unittest.TestCase):
         problems_by_severity = urlopen(base_url + "/problems?severity=warning").read().decode("utf-8")
         search = urlopen(base_url + "/search?q=llm").read().decode("utf-8")
         actions = urlopen(base_url + "/actions").read().decode("utf-8")
+        style = urlopen(base_url + "/static/style.css").read().decode("utf-8")
         build_preview = urlopen(base_url + "/actions/build-ui-data").read().decode("utf-8")
         explain_preview = urlopen(base_url + "/actions/explain?module=llm").read().decode("utf-8")
         verify_preview = urlopen(base_url + "/actions/verify?module=llm").read().decode("utf-8")
@@ -747,6 +763,17 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("/file?path=", module)
         self.assertIn("/history/generation/generation-run", module)
         self.assertIn("Factual layer text", module)
+        factual_section = module[module.index('<section id="facts"') : module.index('<section id="enhanced"')]
+        self.assertIn('class="markdown-body factual-document"', factual_section)
+        self.assertIn("<table>", factual_section)
+        self.assertIn("<th>category</th>", factual_section)
+        self.assertIn("Key files", factual_section)
+        self.assertIn("Key entities", factual_section)
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md", factual_section)
+        self.assertIn("/artifact?path=docs%2Fgenerated%2Farchitecture.md", factual_section)
+        self.assertIn("Open raw markdown", factual_section)
+        self.assertNotIn('<pre class="artifact">', factual_section)
+        self.assertNotIn("| category | file |", factual_section)
         self.assertIn("Enhanced explanation.", module)
         self.assertIn("Problems / Проблемы", problems)
         self.assertIn("Module-level problems", problems)
@@ -779,6 +806,9 @@ class UiServerCliTests(unittest.TestCase):
         self.assertEqual(current_state["latest_generation_run"]["run_id"], "generation-run")
         self.assertNotIn("https://", home + modules + module + problems + search)
         self.assertNotIn("cdn", (home + modules + module + problems + search).lower())
+        self.assertIn(".markdown-body table", style)
+        self.assertIn(".markdown-scroll", style)
+        self.assertIn("overflow-x: auto", style)
 
     def test_actions_post_build_ui_data_uses_allowlisted_runner(self) -> None:
         root = self.make_temp_dir()
@@ -957,6 +987,25 @@ class UiServerCliTests(unittest.TestCase):
         self.assertEqual(set(content.__dataclass_fields__), DISPLAY_CONTENT_FIELDS)
         self.assertTrue(semantic_leaf_names.isdisjoint(content.__dataclass_fields__))
         self.assertIn("weak claims: 999", content.text)
+
+    def test_missing_factual_artifact_renders_empty_state_safely(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        (generated / "modules" / "module-package-llm.md").unlink()
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        module = urlopen(base_url + "/module/llm").read().decode("utf-8")
+        factual_section = module[module.index('<section id="facts"') : module.index('<section id="enhanced"')]
+
+        self.assertIn("Missing factual artifact", factual_section)
+        self.assertNotIn('class="markdown-body factual-document"', factual_section)
+
+    def test_factual_rendering_uses_central_renderer_not_manual_markdown_parsing(self) -> None:
+        source = inspect.getsource(ui_server)
+
+        self.assertIn("render_artifact_content", source)
+        self.assertNotIn("markdown.markdown", source)
+        self.assertNotIn("nh3.clean", source)
 
     def test_invalid_history_run_returns_not_found_and_empty_history_renders(self) -> None:
         root = self.make_temp_dir()

@@ -471,11 +471,12 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
         definition_list(
             [
                 ("Present", "yes" if factual.get("present") else "no"),
-                ("Module doc", artifact_link(factual.get("module_doc_path"), "Open factual artifact")),
+                ("Module doc path", factual.get("module_doc_path")),
+                ("Raw artifact", artifact_link(factual.get("module_doc_path"), "Open raw markdown")),
             ],
-            raw_labels={"Module doc"},
+            raw_labels={"Raw artifact"},
         ),
-        render_artifact_text("Factual markdown", factual.get("module_doc_path"), config),
+        render_factual_document(factual, config),
         "</section>",
         '<section id="enhanced" class="panel layer enhanced"><h2>ИИ-объяснение / Enhanced explanation</h2>',
         render_layer_presence("Enhanced explanation", enhanced.get("present")),
@@ -1940,6 +1941,27 @@ def render_artifact_pre(path: str, config: UiServerConfig) -> str:
     return artifact.rendered_html
 
 
+def render_factual_document(factual: dict[str, Any], config: UiServerConfig) -> str:
+    path = factual.get("module_doc_path")
+    if not path or not factual.get("present"):
+        return '<p class="empty-state">Factual documentation artifact is missing for this module.</p>'
+    try:
+        resolved = resolve_artifact_path(str(path), config)
+        artifact = render_artifact_content(resolved, view="rendered")
+    except ValueError as exc:
+        return f'<p class="empty-state">{esc(str(exc))}</p>'
+    except (FileNotFoundError, OSError):
+        return f'<p class="empty-state">Missing factual artifact: {esc(path)}</p>'
+
+    warnings = "".join(f'<p class="muted">{esc(warning)}</p>' for warning in artifact.warnings)
+    return (
+        '<div class="markdown-scroll">'
+        f'<div class="markdown-body factual-document">{artifact.rendered_html}</div>'
+        "</div>"
+        + warnings
+    )
+
+
 def load_artifact_display_content(path: str, config: UiServerConfig) -> DisplayContent:
     """Load artifact body for display only; never derive semantic UI state."""
     resolved = resolve_artifact_path(path, config)
@@ -2307,6 +2329,66 @@ main { width: min(1180px, calc(100% - 32px)); margin: 24px auto 48px; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { color: var(--muted); font-size: 12px; font-weight: 650; }
+.markdown-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 18px 0 10px;
+  line-height: 1.2;
+}
+.markdown-body h1 { font-size: 22px; }
+.markdown-body h2 { font-size: 18px; }
+.markdown-body h3 { font-size: 16px; }
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote {
+  margin: 10px 0;
+}
+.markdown-body table {
+  width: auto;
+  min-width: max-content;
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+.markdown-body th,
+.markdown-body td {
+  max-width: 520px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.markdown-body th {
+  background: #f1f5f9;
+}
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+.markdown-body code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #eef1f5;
+}
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+}
+.markdown-body a {
+  color: var(--brand);
+  text-decoration: underline;
+}
 .badge {
   display: inline-block;
   min-width: 32px;
