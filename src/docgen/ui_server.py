@@ -2457,7 +2457,11 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
 }
 .markdown-body {
   min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  line-height: 1.62;
   overflow-wrap: anywhere;
+  color: var(--text);
 }
 .factual-document,
 .enhanced-document,
@@ -2492,59 +2496,120 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fbfcfe;
+  color: #172033;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
   white-space: pre;
 }
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
 .markdown-body h4 {
-  margin: 18px 0 10px;
+  margin: 22px 0 10px;
   line-height: 1.2;
+  color: #132033;
 }
-.markdown-body h1 { font-size: 22px; }
-.markdown-body h2 { font-size: 18px; }
+.markdown-body h1:first-child,
+.markdown-body h2:first-child,
+.markdown-body h3:first-child,
+.markdown-body h4:first-child {
+  margin-top: 0;
+}
+.markdown-body h1 { font-size: 24px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.markdown-body h2 { font-size: 19px; padding-top: 4px; }
 .markdown-body h3 { font-size: 16px; }
+.markdown-body h4 { font-size: 14px; }
 .markdown-body p,
 .markdown-body ul,
 .markdown-body ol,
 .markdown-body blockquote {
-  margin: 10px 0;
+  margin: 12px 0;
+}
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 24px;
+}
+.markdown-body li {
+  margin: 5px 0;
 }
 .markdown-body table {
-  width: auto;
-  min-width: max-content;
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
-  margin: 12px 0;
+  margin: 14px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
 }
 .markdown-body th,
 .markdown-body td {
-  max-width: 520px;
+  max-width: 560px;
   padding: 8px 10px;
   border: 1px solid var(--line);
   overflow-wrap: anywhere;
+  vertical-align: top;
 }
 .markdown-body th {
-  background: #f1f5f9;
+  background: #f3f6fa;
+  color: #334155;
+  font-weight: 650;
 }
-.markdown-body pre {
-  overflow-x: auto;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+.markdown-body tr:nth-child(even) td {
   background: #fbfcfe;
 }
+.markdown-body pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f7f9fc;
+  color: #172033;
+  line-height: 1.55;
+  white-space: pre;
+}
 .markdown-body code {
-  padding: 1px 4px;
+  padding: 2px 5px;
   border-radius: 4px;
-  background: #eef1f5;
+  background: #eef2f6;
+  color: #172033;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
 }
 .markdown-body pre code {
   padding: 0;
   background: transparent;
+  font-size: 13px;
 }
 .markdown-body a {
   color: var(--brand);
   text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body a:hover,
+.markdown-body a:focus {
+  color: #0f4f8f;
+}
+.markdown-body blockquote {
+  padding: 10px 14px;
+  border-left: 4px solid #c7d7ea;
+  background: #f7fafd;
+  color: #465569;
+}
+.markdown-body blockquote > :first-child {
+  margin-top: 0;
+}
+.markdown-body blockquote > :last-child {
+  margin-bottom: 0;
+}
+.markdown-body hr {
+  height: 1px;
+  border: 0;
+  background: var(--line);
+  margin: 22px 0;
 }
 .badge {
   display: inline-block;
