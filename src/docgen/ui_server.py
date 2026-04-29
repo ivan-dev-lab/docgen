@@ -472,7 +472,7 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
             [
                 ("Present", "yes" if factual.get("present") else "no"),
                 ("Module doc path", factual.get("module_doc_path")),
-                ("Raw artifact", artifact_link(factual.get("module_doc_path"), "Open raw markdown")),
+                ("Raw artifact", artifact_link(factual.get("module_doc_path"), "Open raw markdown", view="raw")),
             ],
             raw_labels={"Raw artifact"},
         ),
@@ -485,7 +485,7 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
                 ("Generation status", enhanced.get("generation_status")),
                 ("Generation run", history_link("generation", enhanced.get("generation_run_id"), enhanced.get("generation_run_id"))),
                 ("Metadata", artifact_link(enhanced.get("metadata_path"), "Open generation metadata")),
-                ("Raw artifact", artifact_link(enhanced.get("markdown_path"), "Open raw enhanced artifact")),
+                ("Raw artifact", artifact_link(enhanced.get("markdown_path"), "Open raw enhanced artifact", view="raw")),
             ],
             raw_labels={"Generation run", "Metadata", "Raw artifact"},
         ),
@@ -673,6 +673,7 @@ def render_file_page(query: str, config: UiServerConfig, data: UiDataBundle) -> 
     path = (params.get("path") or [""])[0]
     if not path:
         raise ValueError("Missing file path.")
+    view = requested_artifact_view(params)
     related_modules = [
         module
         for module in module_records(data)
@@ -684,9 +685,7 @@ def render_file_page(query: str, config: UiServerConfig, data: UiDataBundle) -> 
         '<section class="panel"><h2>Related Modules</h2>',
         render_module_link_list(related_modules),
         "</section>",
-        '<section class="panel"><h2>Artifact Content</h2>',
-        render_artifact_pre(path, config),
-        "</section>",
+        render_artifact_display_panel(path, view, config, route="/file", document_class="file-document", heading="Artifact Content"),
     ]
     return layout("File", "\n".join(content), data)
 
@@ -696,11 +695,10 @@ def render_artifact_page(query: str, config: UiServerConfig, data: UiDataBundle)
     path = (params.get("path") or [""])[0]
     if not path:
         raise ValueError("Missing artifact path.")
+    view = requested_artifact_view(params)
     content = [
         page_header("Artifact", path),
-        '<section class="panel"><h2>Content</h2>',
-        render_artifact_pre(path, config),
-        "</section>",
+        render_artifact_display_panel(path, view, config, route="/artifact", document_class="artifact-document", heading="Content"),
     ]
     return layout("Artifact", "\n".join(content), data)
 
@@ -1937,6 +1935,78 @@ def render_artifact_pre(path: str, config: UiServerConfig) -> str:
     return artifact.rendered_html
 
 
+def requested_artifact_view(params: dict[str, list[str]]) -> str:
+    view = (params.get("view") or ["rendered"])[0] or "rendered"
+    if view not in {"rendered", "raw"}:
+        raise ValueError(f"Invalid artifact view: {view}")
+    return view
+
+
+def render_artifact_display_panel(
+    path: str,
+    view: str,
+    config: UiServerConfig,
+    *,
+    route: str,
+    document_class: str,
+    heading: str,
+) -> str:
+    try:
+        resolved = resolve_artifact_path(path, config)
+        artifact = render_artifact_content(resolved, view=view)
+    except FileNotFoundError:
+        return f'<section class="panel"><h2>{esc(heading)}</h2><p class="empty-state">Missing artifact: {esc(path)}</p></section>'
+
+    metadata = definition_list(
+        [
+            ("Path", artifact.path),
+            ("Content type", artifact.content_type),
+            ("View", view),
+        ]
+    )
+    return (
+        f'<section class="panel artifact-view"><h2>{esc(heading)}</h2>'
+        + metadata
+        + render_artifact_view_toggle(route, path, view)
+        + render_artifact_display_body(artifact, view, document_class)
+        + render_artifact_warnings(artifact.warnings)
+        + "</section>"
+    )
+
+
+def render_artifact_display_body(artifact: Any, view: str, document_class: str) -> str:
+    if artifact.content_type == "text/markdown" and view == "rendered":
+        return (
+            '<div class="markdown-scroll">'
+            f'<div class="markdown-body {esc(document_class)}">{artifact.rendered_html}</div>'
+            "</div>"
+        )
+    text = artifact.raw_text or "Binary or unsupported artifact cannot be displayed as text."
+    return f'<pre class="raw-artifact-content">{html.escape(text, quote=False)}</pre>'
+
+
+def render_artifact_warnings(warnings: list[str]) -> str:
+    if not warnings:
+        return ""
+    items = "".join(f"<li>{esc(warning)}</li>" for warning in warnings)
+    return f'<div class="notice artifact-warnings"><strong>Warnings</strong><ul>{items}</ul></div>'
+
+
+def render_artifact_view_toggle(route: str, path: str, active_view: str) -> str:
+    return (
+        '<nav class="view-toggle" aria-label="Artifact view mode">'
+        + render_artifact_view_toggle_link(route, path, "rendered", "Rendered", active_view)
+        + render_artifact_view_toggle_link(route, path, "raw", "Raw", active_view)
+        + "</nav>"
+    )
+
+
+def render_artifact_view_toggle_link(route: str, path: str, view: str, label: str, active_view: str) -> str:
+    href = f'{route}?path={quote(str(path), safe="")}&view={quote(view, safe="")}'
+    active = " active" if view == active_view else ""
+    return f'<a class="view-toggle-link{active}" href="{href}">{esc(label)}</a>'
+
+
 def render_factual_document(factual: dict[str, Any], config: UiServerConfig) -> str:
     path = factual.get("module_doc_path")
     if not path or not factual.get("present"):
@@ -2028,10 +2098,13 @@ def module_link(module: dict[str, Any]) -> str:
     return f'<a href="/module/{quote(name, safe="")}">{esc(name)}</a>'
 
 
-def artifact_link(path: Any, label: str) -> str:
+def artifact_link(path: Any, label: str, *, view: str | None = None) -> str:
     if not path:
         return '<span class="muted">нет данных</span>'
-    return f'<a href="/artifact?path={quote(str(path), safe="")}">{esc(label)}</a>'
+    href = f'/artifact?path={quote(str(path), safe="")}'
+    if view:
+        href += f'&view={quote(view, safe="")}'
+    return f'<a href="{href}">{esc(label)}</a>'
 
 
 def history_link(kind: str, run_id: Any, label: Any) -> str:
@@ -2087,14 +2160,25 @@ def find_module(data: UiDataBundle, name: str) -> dict[str, Any] | None:
 
 
 def resolve_artifact_path(value: str, config: UiServerConfig) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = config.project_root / path
+    raw_value = value.strip()
+    if _is_forbidden_route_path(raw_value):
+        raise ValueError(f"Artifact path is outside allowed roots: {value}")
+    path = config.project_root / raw_value
     resolved = path.resolve()
     allowed_roots = [config.generated_root.resolve(), config.enhanced_root.resolve(), config.ui_data_root.resolve()]
     if not any(is_relative_to(resolved, root) for root in allowed_roots):
         raise ValueError(f"Artifact path is outside allowed roots: {value}")
     return resolved
+
+
+def _is_forbidden_route_path(value: str) -> bool:
+    return (
+        not value
+        or value.startswith(("/", "\\"))
+        or value.startswith("//")
+        or value.startswith("\\\\")
+        or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
+    )
 
 
 def is_relative_to(path: Path, root: Path) -> bool:
@@ -2377,8 +2461,38 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
 }
 .factual-document,
 .enhanced-document,
-.verification-document {
+.verification-document,
+.artifact-document,
+.file-document {
   max-width: 100%;
+}
+.view-toggle {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+.view-toggle-link {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  text-decoration: none;
+}
+.view-toggle-link.active {
+  border-color: var(--brand);
+  background: #eef6ff;
+  color: var(--brand);
+  font-weight: 650;
+}
+.raw-artifact-content {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+  white-space: pre;
 }
 .markdown-body h1,
 .markdown-body h2,

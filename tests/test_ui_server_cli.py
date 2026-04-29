@@ -115,6 +115,7 @@ class UiServerCliTests(unittest.TestCase):
         generated_file.parent.mkdir(parents=True, exist_ok=True)
         enhanced_module.parent.mkdir(parents=True, exist_ok=True)
         verification_summary.parent.mkdir(parents=True, exist_ok=True)
+        (generated / "notes.txt").write_text("plain text <b>not html</b>\n", encoding="utf-8")
         generated_module.write_text(
             "# Factual llm\n\n"
             "Factual layer text.\n\n"
@@ -129,7 +130,15 @@ class UiServerCliTests(unittest.TestCase):
             "| Config | `src/docgen/llm/config.py` |\n",
             encoding="utf-8",
         )
-        generated_file.write_text("# File config\n\nFile documentation.\n", encoding="utf-8")
+        generated_file.write_text(
+            "# File config\n\n"
+            "File documentation.\n\n"
+            "| kind | link |\n"
+            "| --- | --- |\n"
+            "| self | [config](file-src-docgen-llm-config-py.md) |\n"
+            "| module | [llm](../modules/module-package-llm.md) |\n",
+            encoding="utf-8",
+        )
         enhanced_module.write_text(
             "# Enhanced llm\n\n"
             "Enhanced explanation.\n\n"
@@ -875,6 +884,10 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn(".markdown-scroll", style)
         self.assertIn(".enhanced-document", style)
         self.assertIn(".verification-document", style)
+        self.assertIn(".artifact-document", style)
+        self.assertIn(".file-document", style)
+        self.assertIn(".raw-artifact-content", style)
+        self.assertIn(".view-toggle", style)
         self.assertIn("overflow-x: auto", style)
 
     def test_actions_post_build_ui_data_uses_allowlisted_runner(self) -> None:
@@ -1007,8 +1020,20 @@ class UiServerCliTests(unittest.TestCase):
         file_page = urlopen(
             base_url + "/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md"
         ).read().decode("utf-8")
+        file_raw_page = urlopen(
+            base_url + "/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md&view=raw"
+        ).read().decode("utf-8")
         artifact_page = urlopen(
             base_url + "/artifact?path=docs%2Fenhanced%2Fmodules%2Fmodule-package-llm.md"
+        ).read().decode("utf-8")
+        artifact_raw_page = urlopen(
+            base_url + "/artifact?path=docs%2Fenhanced%2Fmodules%2Fmodule-package-llm.md&view=raw"
+        ).read().decode("utf-8")
+        json_artifact_page = urlopen(
+            base_url + "/artifact?path=docs%2Fui-data%2Fcurrent-state.json"
+        ).read().decode("utf-8")
+        text_artifact_page = urlopen(
+            base_url + "/artifact?path=docs%2Fgenerated%2Fnotes.txt"
         ).read().decode("utf-8")
 
         self.assertIn("Generation Runs", history)
@@ -1038,8 +1063,32 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("/history/verification/verification-run", verification_compare)
         self.assertIn("File config", file_page)
         self.assertIn("Related Modules", file_page)
+        self.assertIn('class="markdown-body file-document"', file_page)
+        self.assertIn("<table>", file_page)
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md", file_page)
+        self.assertIn("/artifact?path=docs%2Fgenerated%2Fmodules%2Fmodule-package-llm.md", file_page)
+        self.assertIn('class="view-toggle-link active"', file_page)
+        self.assertIn("&view=raw", file_page)
+        self.assertNotIn('<pre class="raw-artifact-content">', file_page)
+        self.assertIn('class="raw-artifact-content"', file_raw_page)
+        self.assertIn("| kind | link |", file_raw_page)
+        self.assertIn("&view=rendered", file_raw_page)
         self.assertIn("Artifact", artifact_page)
         self.assertIn("Enhanced explanation.", artifact_page)
+        self.assertIn('class="markdown-body artifact-document"', artifact_page)
+        self.assertIn("<h1>Enhanced llm</h1>", artifact_page)
+        self.assertIn("<table>", artifact_page)
+        self.assertNotIn("| topic | link |", artifact_page)
+        self.assertIn("&view=raw", artifact_page)
+        self.assertIn('class="raw-artifact-content"', artifact_raw_page)
+        self.assertIn("| topic | link |", artifact_raw_page)
+        self.assertIn("# Enhanced llm", artifact_raw_page)
+        self.assertNotIn('class="markdown-body artifact-document"', artifact_raw_page)
+        self.assertIn('"latest_generation_run"', json_artifact_page)
+        self.assertIn('class="raw-artifact-content"', json_artifact_page)
+        self.assertNotIn("markdown-body", json_artifact_page)
+        self.assertIn("plain text &lt;b&gt;not html&lt;/b&gt;", text_artifact_page)
+        self.assertIn('class="raw-artifact-content"', text_artifact_page)
 
     def test_artifact_loader_returns_display_content_only(self) -> None:
         root = self.make_temp_dir()
@@ -1054,6 +1103,34 @@ class UiServerCliTests(unittest.TestCase):
         self.assertEqual(set(content.__dataclass_fields__), DISPLAY_CONTENT_FIELDS)
         self.assertTrue(semantic_leaf_names.isdisjoint(content.__dataclass_fields__))
         self.assertIn("weak claims: 999", content.text)
+
+    def test_artifact_and_file_routes_reject_unsafe_or_missing_paths_safely(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        (generated / "binary.bin").write_bytes(b"\x00\x01\x02")
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        for url in (
+            "/artifact?path=..%2F..%2F..%2F..%2F.env",
+            "/artifact?path=C%3A%5Csecret%5C.env",
+            "/artifact?path=%5C%5Cserver%5Cshare%5Csecret.md",
+            "/file?path=..%2F..%2F..%2F..%2F.env",
+        ):
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(base_url + url)
+            self.assertEqual(raised.exception.code, 400)
+
+        with self.assertRaises(HTTPError) as invalid_view:
+            urlopen(base_url + "/artifact?path=docs%2Fgenerated%2Fnotes.txt&view=semantic")
+        self.assertEqual(invalid_view.exception.code, 400)
+
+        missing = urlopen(base_url + "/artifact?path=docs%2Fgenerated%2Fmissing.md").read().decode("utf-8")
+        self.assertIn("Missing artifact", missing)
+        self.assertNotIn("Traceback", missing)
+
+        binary = urlopen(base_url + "/artifact?path=docs%2Fgenerated%2Fbinary.bin").read().decode("utf-8")
+        self.assertIn("Binary or unsupported artifact cannot be displayed as text.", binary)
+        self.assertIn("Artifact appears to be binary or unsupported", binary)
 
     def test_missing_factual_artifact_renders_empty_state_safely(self) -> None:
         root = self.make_temp_dir()
@@ -1101,6 +1178,7 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("render_verification_summary_document", source)
         self.assertNotIn("markdown.markdown", source)
         self.assertNotIn("nh3.clean", source)
+        self.assertNotIn("rewrite_internal_links", source)
 
     def test_invalid_history_run_returns_not_found_and_empty_history_renders(self) -> None:
         root = self.make_temp_dir()

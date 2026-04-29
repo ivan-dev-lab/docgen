@@ -143,7 +143,8 @@ def render_artifact_content(path: Path, *, view: str = "rendered") -> RenderedAr
         rendered_html = render_markdown(raw_text, base_artifact_path=str(path))
         content_type = "text/markdown"
     elif suffix == ".json":
-        raw_text = _pretty_json(raw_text, warnings)
+        if view != "raw":
+            raw_text = _pretty_json(raw_text, warnings)
         rendered_html = raw_pre(raw_text)
         content_type = "application/json"
     else:

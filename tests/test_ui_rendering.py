@@ -387,12 +387,16 @@ class UiRenderingTests(unittest.TestCase):
         artifact.write_text('{"markdown":"# Title","html":"<script>alert(1)</script>"}', encoding="utf-8")
 
         rendered = render_artifact_content(artifact, view="rendered")
+        raw = render_artifact_content(artifact, view="raw")
 
         self.assertEqual(rendered.content_type, "application/json")
         self.assertIn('"markdown": "# Title"', rendered.raw_text)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered.rendered_html)
         self.assertNotIn("<h1>Title</h1>", rendered.rendered_html)
         self.assertNotIn("<script>", rendered.rendered_html)
+        self.assertEqual(raw.content_type, "application/json")
+        self.assertIn('{"markdown":"# Title"', raw.raw_text)
+        self.assertNotIn('\n  "markdown"', raw.raw_text)
 
     def test_render_markdown_returns_html_string_not_semantic_payload(self) -> None:
         html = render_markdown("# Title\n\nverdict: fail\nweak claims: 999")
