@@ -130,7 +130,21 @@ class UiServerCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         generated_file.write_text("# File config\n\nFile documentation.\n", encoding="utf-8")
-        enhanced_module.write_text("# Enhanced llm\n\nEnhanced explanation.\n", encoding="utf-8")
+        enhanced_module.write_text(
+            "# Enhanced llm\n\n"
+            "Enhanced explanation.\n\n"
+            "## Key insights\n\n"
+            "- Uses rendered markdown.\n"
+            "- Keeps links safe.\n\n"
+            "| topic | link |\n"
+            "| --- | --- |\n"
+            "| file | [config](../../generated/files/file-src-docgen-llm-config-py.md) |\n"
+            "| verification | [summary](../verification/module-package-llm.verification.md) |\n\n"
+            "```python\n"
+            "print(\"[file](../../generated/files/file-src-docgen-llm-config-py.md)\")\n"
+            "```\n",
+            encoding="utf-8",
+        )
         verification_summary.write_text("# Verification llm\n\nVerification summary.\n", encoding="utf-8")
         self.write_json(
             verification_json,
@@ -774,7 +788,24 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Open raw markdown", factual_section)
         self.assertNotIn('<pre class="artifact">', factual_section)
         self.assertNotIn("| category | file |", factual_section)
-        self.assertIn("Enhanced explanation.", module)
+        enhanced_section = module[module.index('<section id="enhanced"') : module.index('<section id="verification"')]
+        self.assertIn('class="markdown-body enhanced-document"', enhanced_section)
+        self.assertIn("<h1>Enhanced llm</h1>", enhanced_section)
+        self.assertIn("<h2>Key insights</h2>", enhanced_section)
+        self.assertIn("<ul>", enhanced_section)
+        self.assertIn("<table>", enhanced_section)
+        self.assertIn("<pre><code", enhanced_section)
+        self.assertIn("Enhanced explanation.", enhanced_section)
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md", enhanced_section)
+        self.assertIn("/artifact?path=docs%2Fenhanced%2Fverification%2Fmodule-package-llm.verification.md", enhanced_section)
+        self.assertEqual(
+            enhanced_section.count("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md"),
+            1,
+        )
+        self.assertIn("[file](../../generated/files/file-src-docgen-llm-config-py.md)", enhanced_section)
+        self.assertIn("Open raw enhanced artifact", enhanced_section)
+        self.assertNotIn('<pre class="artifact">', enhanced_section)
+        self.assertNotIn("| topic | link |", enhanced_section)
         self.assertIn("Problems / Проблемы", problems)
         self.assertIn("Module-level problems", problems)
         self.assertIn("Issue-level problems", problems)
@@ -808,6 +839,7 @@ class UiServerCliTests(unittest.TestCase):
         self.assertNotIn("cdn", (home + modules + module + problems + search).lower())
         self.assertIn(".markdown-body table", style)
         self.assertIn(".markdown-scroll", style)
+        self.assertIn(".enhanced-document", style)
         self.assertIn("overflow-x: auto", style)
 
     def test_actions_post_build_ui_data_uses_allowlisted_runner(self) -> None:
@@ -1000,10 +1032,23 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Missing factual artifact", factual_section)
         self.assertNotIn('class="markdown-body factual-document"', factual_section)
 
-    def test_factual_rendering_uses_central_renderer_not_manual_markdown_parsing(self) -> None:
+    def test_missing_enhanced_artifact_renders_empty_state_safely(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        (enhanced / "modules" / "module-package-llm.md").unlink()
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        module = urlopen(base_url + "/module/llm").read().decode("utf-8")
+        enhanced_section = module[module.index('<section id="enhanced"') : module.index('<section id="verification"')]
+
+        self.assertIn("Missing enhanced artifact", enhanced_section)
+        self.assertNotIn('class="markdown-body enhanced-document"', enhanced_section)
+
+    def test_module_markdown_rendering_uses_central_renderer_not_manual_markdown_parsing(self) -> None:
         source = inspect.getsource(ui_server)
 
         self.assertIn("render_artifact_content", source)
+        self.assertIn("render_enhanced_document", source)
         self.assertNotIn("markdown.markdown", source)
         self.assertNotIn("nh3.clean", source)
 
