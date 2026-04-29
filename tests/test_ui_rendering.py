@@ -49,6 +49,28 @@ class UiRenderingTests(unittest.TestCase):
         self.assertIn("language-python", html)
         self.assertIn("print(1)", html)
 
+    def test_fenced_code_with_markdown_link_stays_plain_text(self) -> None:
+        html = render_markdown(
+            '```python\nprint("[file](../files/file-src-docgen-ui-server-py.md)")\n```',
+            base_artifact_path="docs/generated/modules/module-package-docgen.md",
+        )
+
+        self.assertIn("<pre><code", html)
+        self.assertIn('[file](../files/file-src-docgen-ui-server-py.md)', html)
+        self.assertNotIn("<a ", html)
+        self.assertNotIn("/file?path=", html)
+
+    def test_trailing_unclosed_fenced_code_with_markdown_link_stays_plain_text(self) -> None:
+        html = render_markdown(
+            '```python\nprint("[file](../files/file-src-docgen-ui-server-py.md)")',
+            base_artifact_path="docs/generated/modules/module-package-docgen.md",
+        )
+
+        self.assertIn("<pre><code", html)
+        self.assertIn('[file](../files/file-src-docgen-ui-server-py.md)', html)
+        self.assertNotIn("<a ", html)
+        self.assertNotIn("/file?path=", html)
+
     def test_inline_code_renders_to_code(self) -> None:
         html = render_markdown("Use `docgen` now.")
 
@@ -159,6 +181,12 @@ class UiRenderingTests(unittest.TestCase):
         self.assertIn("<code", html)
         self.assertIn("language-python", html)
 
+    def test_code_block_survives_sanitizer_after_render_markdown(self) -> None:
+        html = render_markdown("```python\nprint(1)\n```")
+
+        self.assertIn("<pre><code", html)
+        self.assertIn("print(1)", html)
+
     def test_relative_markdown_link_is_rewritten_to_artifact_route(self) -> None:
         root = self.make_temp_dir()
         base = root / "docs" / "generated" / "modules" / "current.md"
@@ -166,6 +194,58 @@ class UiRenderingTests(unittest.TestCase):
         html = render_markdown("[Other](other.md)", base_artifact_path=str(base))
 
         self.assertIn('/artifact?path=docs%2Fgenerated%2Fmodules%2Fother.md', html)
+
+    def test_relative_generated_file_doc_link_is_rewritten_to_file_route(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "module-package-docgen.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[UI server](../files/file-src-docgen-ui-server-py.md)", base_artifact_path=str(base))
+
+        self.assertIn('/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-ui-server-py.md', html)
+        self.assertNotIn("/artifact?path=", html)
+
+    def test_ordinary_paragraph_link_still_rewrites_after_code_regression(self) -> None:
+        html = render_markdown(
+            "See [file](../files/file-src-docgen-ui-server-py.md).",
+            base_artifact_path="docs/generated/modules/module-package-docgen.md",
+        )
+
+        self.assertIn('/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-ui-server-py.md', html)
+
+    def test_relative_generated_non_file_markdown_link_is_rewritten_to_artifact_route(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "module-package-docgen.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[Architecture](../architecture.md)", base_artifact_path=str(base))
+
+        self.assertIn('/artifact?path=docs%2Fgenerated%2Farchitecture.md', html)
+
+    def test_relative_enhanced_markdown_link_is_rewritten_to_artifact_route(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "enhanced" / "modules" / "module-package-llm.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[Verification](../verification/module-package-llm.verification.md)", base_artifact_path=str(base))
+
+        self.assertIn('/artifact?path=docs%2Fenhanced%2Fverification%2Fmodule-package-llm.verification.md', html)
+
+    def test_relative_ui_data_json_link_is_rewritten_to_artifact_route(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "module-package-docgen.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[Current state](../../ui-data/current-state.json)", base_artifact_path=str(base))
+
+        self.assertIn('/artifact?path=docs%2Fui-data%2Fcurrent-state.json', html)
+
+    def test_mailto_link_remains_safe(self) -> None:
+        html = render_markdown("[Mail](mailto:docs@example.com)")
+
+        self.assertIn('href="mailto:docs@example.com"', html)
+
+    def test_file_scheme_href_is_removed(self) -> None:
+        html = render_markdown("[file](file:///C:/secret.md)")
+
+        self.assertNotIn("file:", html.lower())
+        self.assertNotIn("href=", html.lower())
 
     def test_path_traversal_link_does_not_escape_allowed_roots(self) -> None:
         root = self.make_temp_dir()
@@ -175,6 +255,97 @@ class UiRenderingTests(unittest.TestCase):
 
         self.assertNotIn("secret.md", html)
         self.assertNotIn("href=", html.lower())
+
+    def test_path_traversal_to_env_does_not_become_artifact_link(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[env](../../../../.env)", base_artifact_path=str(base))
+
+        self.assertNotIn(".env", html)
+        self.assertNotIn("/artifact?path=", html)
+        self.assertNotIn("href=", html.lower())
+
+    def test_windows_style_relative_path_is_normalized_to_ui_route(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = rewrite_internal_links(
+            '<a href="..\\files\\file-src-docgen-ui-server-py.md">UI server</a>',
+            base_artifact_path=str(base),
+        )
+
+        self.assertIn('/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-ui-server-py.md', html)
+
+    def test_absolute_filesystem_path_is_rejected(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = rewrite_internal_links('<a href="C:\\Users\\secret.md">abs</a>', base_artifact_path=str(base))
+
+        self.assertNotIn("href=", html.lower())
+
+    def test_unc_path_is_rejected(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = rewrite_internal_links('<a href="\\\\server\\share\\secret.md">unc</a>', base_artifact_path=str(base))
+
+        self.assertNotIn("href=", html.lower())
+
+    def test_anchor_fragment_is_preserved_for_internal_markdown_link(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("[Architecture](../architecture.md#runtime-flow)", base_artifact_path=str(base))
+
+        self.assertIn('/artifact?path=docs%2Fgenerated%2Farchitecture.md#runtime-flow', html)
+
+    def test_spaces_and_special_characters_in_internal_path_are_encoded(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = rewrite_internal_links(
+            '<a href="../files/file with spaces &amp; symbols.md">File</a>',
+            base_artifact_path=str(base),
+        )
+
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile%20with%20spaces%20%26%20symbols.md", html)
+
+    def test_already_rewritten_artifact_link_is_not_double_rewritten(self) -> None:
+        html = render_markdown("[Architecture](/artifact?path=docs%2Fgenerated%2Farchitecture.md)")
+
+        self.assertEqual(html.count("/artifact?path="), 1)
+        self.assertIn('href="/artifact?path=docs%2Fgenerated%2Farchitecture.md"', html)
+
+    def test_rewriting_preserves_markdown_table_structure(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("| Link |\n|---|\n| [File](../files/x.md) |", base_artifact_path=str(base))
+
+        self.assertIn("<table>", html)
+        self.assertIn("<td>", html)
+        self.assertIn('/file?path=docs%2Fgenerated%2Ffiles%2Fx.md', html)
+
+    def test_table_link_still_rewrites_after_code_regression(self) -> None:
+        html = render_markdown(
+            "| Link |\n|---|\n| [file](../files/file-src-docgen-ui-server-py.md) |",
+            base_artifact_path="docs/generated/modules/module-package-docgen.md",
+        )
+
+        self.assertIn("<table>", html)
+        self.assertIn('/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-ui-server-py.md', html)
+
+    def test_rewriting_preserves_code_block_structure(self) -> None:
+        root = self.make_temp_dir()
+        base = root / "docs" / "generated" / "modules" / "current.md"
+        base.parent.mkdir(parents=True)
+        html = render_markdown("```md\n[File](../files/x.md)\n```", base_artifact_path=str(base))
+
+        self.assertIn("<pre><code", html)
+        self.assertIn("[File](../files/x.md)", html)
+        self.assertNotIn("/file?path=", html)
 
     def test_rewrite_without_base_does_not_guess_relative_markdown_links(self) -> None:
         html = rewrite_internal_links('<a href="other.md">Other</a>')
@@ -186,7 +357,7 @@ class UiRenderingTests(unittest.TestCase):
         root = self.make_temp_dir()
         artifact = root / "docs" / "generated" / "modules" / "sample.md"
         artifact.parent.mkdir(parents=True)
-        artifact.write_text("# Title\n\nText", encoding="utf-8")
+        artifact.write_text("# Title\n\n[File](../files/file-src-docgen-ui-server-py.md)", encoding="utf-8")
 
         rendered = render_artifact_content(artifact, view="rendered")
 
@@ -194,6 +365,7 @@ class UiRenderingTests(unittest.TestCase):
         self.assertEqual(rendered.view, "rendered")
         self.assertIn("# Title", rendered.raw_text)
         self.assertIn("<h1>Title</h1>", rendered.rendered_html)
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-ui-server-py.md", rendered.rendered_html)
 
     def test_render_artifact_content_supports_raw_mode(self) -> None:
         root = self.make_temp_dir()

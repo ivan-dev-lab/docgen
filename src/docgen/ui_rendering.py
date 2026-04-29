@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
 
 import markdown
 import nh3
@@ -21,6 +21,7 @@ import nh3
 
 DEFAULT_TEXT_LIMIT = 200_000
 ALLOWED_DOC_ROOT_NAMES = ("generated", "enhanced", "ui-data")
+ALLOWED_UI_ROUTES = frozenset({"/artifact", "/file"})
 MARKDOWN_EXTENSIONS = ("tables", "fenced_code", "sane_lists")
 ALLOWED_TAGS = frozenset(
     {
@@ -88,8 +89,9 @@ def render_markdown(markdown_text: str, *, base_artifact_path: str | None = None
     """Render markdown display content to safe HTML without deriving UI semantics."""
     # Use a fresh parser per call. The local UI server is threaded, and
     # markdown.Markdown instances are mutable during conversion.
+    normalized_markdown = _close_trailing_unclosed_fence(markdown_text)
     rendered = markdown.markdown(
-        markdown_text,
+        normalized_markdown,
         extensions=list(MARKDOWN_EXTENSIONS),
         output_format="html",
     )
@@ -167,18 +169,25 @@ class _InternalLinkRewriter(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.base_artifact_path = _resolve_optional_path(base_artifact_path)
         self.parts: list[str] = []
+        self.code_depth = 0
 
     def output(self) -> str:
         return "".join(self.parts)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.parts.append(self._format_starttag(tag, attrs, closed=False))
+        normalized_tag = tag.lower()
+        self.parts.append(self._format_starttag(normalized_tag, attrs, closed=False))
+        if normalized_tag in {"pre", "code"}:
+            self.code_depth += 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.parts.append(self._format_starttag(tag, attrs, closed=True))
+        self.parts.append(self._format_starttag(tag.lower(), attrs, closed=True))
 
     def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
         self.parts.append(f"</{html.escape(tag, quote=True)}>")
+        if normalized_tag in {"pre", "code"} and self.code_depth > 0:
+            self.code_depth -= 1
 
     def handle_data(self, data: str) -> None:
         self.parts.append(html.escape(data, quote=False))
@@ -200,6 +209,8 @@ class _InternalLinkRewriter(HTMLParser):
         return f"<{html.escape(tag, quote=True)}{rendered_attrs}{slash}>"
 
     def _rewrite_attrs(self, tag: str, attrs: list[tuple[str, str | None]]) -> list[tuple[str, str | None]]:
+        if self.code_depth > 0:
+            return attrs
         if tag != "a":
             return attrs
 
@@ -228,28 +239,124 @@ def _rewrite_href(href: str, base_artifact_path: Path | None) -> str | None:
     stripped = href.strip()
     if not stripped:
         return href
+    if _is_windows_drive_path(stripped) or _is_unc_path(stripped):
+        return None
 
     parsed = urlsplit(stripped)
     if parsed.scheme:
         return stripped if parsed.scheme.lower() in ALLOWED_URL_SCHEMES else None
     if parsed.netloc:
         return None
-    if stripped.startswith(("#", "/")):
+    if stripped.startswith("#"):
         return stripped
+    if parsed.path.startswith("/"):
+        return _safe_existing_ui_href(stripped)
     if base_artifact_path is None:
         return stripped
 
-    target_path = (base_artifact_path.parent / unquote(parsed.path)).resolve()
-    relative_artifact_path = _allowed_relative_artifact_path(target_path, base_artifact_path)
-    if relative_artifact_path is None:
+    link_path = _normalized_relative_link_path(parsed.path)
+    if link_path is None:
         return None
-    if target_path.suffix.lower() != ".md":
-        return stripped
+    target_path = (base_artifact_path.parent / unquote(link_path)).resolve()
+    rewritten = _artifact_ui_route(target_path, base_artifact_path)
+    if rewritten is None:
+        return None
 
-    rewritten = f"/artifact?path={quote(relative_artifact_path, safe='')}"
     if parsed.fragment:
         rewritten += f"#{quote(parsed.fragment, safe='')}"
     return rewritten
+
+
+def _close_trailing_unclosed_fence(markdown_text: str) -> str:
+    active_marker: str | None = None
+    active_length = 0
+    for line in markdown_text.splitlines():
+        stripped = line.lstrip(" ")
+        if len(line) - len(stripped) > 3:
+            continue
+        marker = _fence_marker(stripped)
+        if marker is None:
+            continue
+        marker_char, marker_length, rest = marker
+        if active_marker is None:
+            active_marker = marker_char
+            active_length = marker_length
+        elif marker_char == active_marker and marker_length >= active_length and rest.strip() == "":
+            active_marker = None
+            active_length = 0
+    if active_marker is None:
+        return markdown_text
+    separator = "" if markdown_text.endswith(("\n", "\r")) else "\n"
+    return f"{markdown_text}{separator}{active_marker * active_length}"
+
+
+def _fence_marker(stripped_line: str) -> tuple[str, int, str] | None:
+    if not stripped_line or stripped_line[0] not in {"`", "~"}:
+        return None
+    marker_char = stripped_line[0]
+    marker_length = 0
+    for character in stripped_line:
+        if character != marker_char:
+            break
+        marker_length += 1
+    if marker_length < 3:
+        return None
+    return marker_char, marker_length, stripped_line[marker_length:]
+
+
+def _artifact_ui_route(path: Path, base_artifact_path: Path | None) -> str | None:
+    relative_artifact_path = _allowed_relative_artifact_path(path, base_artifact_path)
+    if relative_artifact_path is None:
+        return None
+    encoded_path = quote(relative_artifact_path, safe="")
+    if relative_artifact_path.startswith("docs/generated/files/") and path.suffix.lower() == ".md":
+        return f"/file?path={encoded_path}"
+    return f"/artifact?path={encoded_path}"
+
+
+def _normalized_relative_link_path(path_value: str) -> str | None:
+    if not path_value:
+        return path_value
+    if _is_windows_drive_path(path_value) or _is_unc_path(path_value):
+        return None
+    normalized = path_value.replace("\\", "/")
+    if normalized.startswith("/"):
+        return None
+    return normalized
+
+
+def _safe_existing_ui_href(href: str) -> str | None:
+    parsed = urlsplit(href)
+    if parsed.path not in ALLOWED_UI_ROUTES:
+        return None
+    path_values = [value for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key == "path"]
+    if not path_values:
+        return None
+    normalized_path = _normalized_route_path(path_values[0])
+    if normalized_path is None:
+        return None
+    target_path = (Path.cwd() / normalized_path).resolve()
+    if _allowed_relative_artifact_path(target_path, None) is None:
+        return None
+    return href
+
+
+def _normalized_route_path(path_value: str) -> str | None:
+    decoded = unquote(path_value)
+    if _is_windows_drive_path(decoded) or _is_unc_path(decoded):
+        return None
+    normalized = decoded.replace("\\", "/")
+    if normalized.startswith("/") or normalized.startswith("../") or "/../" in normalized or normalized.endswith("/.."):
+        return None
+    return normalized
+
+
+def _is_windows_drive_path(value: str) -> bool:
+    return len(value) >= 2 and value[0].isalpha() and value[1] == ":"
+
+
+def _is_unc_path(value: str) -> bool:
+    return value.startswith("\\\\") or value.startswith("//")
 
 
 def _allowed_relative_artifact_path(path: Path, base_artifact_path: Path | None) -> str | None:
