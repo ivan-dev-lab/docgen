@@ -145,7 +145,21 @@ class UiServerCliTests(unittest.TestCase):
             "```\n",
             encoding="utf-8",
         )
-        verification_summary.write_text("# Verification llm\n\nVerification summary.\n", encoding="utf-8")
+        verification_summary.write_text(
+            "# Verification llm\n\n"
+            "Verification summary.\n\n"
+            "## Findings\n\n"
+            "- Weak claims are reported from JSON.\n"
+            "- Markdown is display-only.\n\n"
+            "| artifact | link |\n"
+            "| --- | --- |\n"
+            "| file | [config](../../generated/files/file-src-docgen-llm-config-py.md) |\n"
+            "| enhanced | [module](../modules/module-package-llm.md) |\n\n"
+            "```python\n"
+            "print(\"[file](../../generated/files/file-src-docgen-llm-config-py.md)\")\n"
+            "```\n",
+            encoding="utf-8",
+        )
         self.write_json(
             verification_json,
             {
@@ -770,7 +784,6 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Enhanced explanation", module)
         self.assertIn("Verification", module)
         self.assertIn("Structured verification summary", module)
-        self.assertLess(module.index("Structured verification summary"), module.index("Verification summary."))
         self.assertIn("Weak claims", module)
         self.assertIn("Unsupported claims", module)
         self.assertIn("Related Files", module)
@@ -806,6 +819,27 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Open raw enhanced artifact", enhanced_section)
         self.assertNotIn('<pre class="artifact">', enhanced_section)
         self.assertNotIn("| topic | link |", enhanced_section)
+        verification_section = module[module.index('<section id="verification"') : module.index('<section id="related-files"')]
+        self.assertIn('class="structured-summary verification-structured-summary"', verification_section)
+        self.assertIn('class="markdown-body verification-document"', verification_section)
+        self.assertIn("<h1>Verification llm</h1>", verification_section)
+        self.assertIn("<h2>Findings</h2>", verification_section)
+        self.assertIn("<ul>", verification_section)
+        self.assertIn("<table>", verification_section)
+        self.assertIn("<pre><code", verification_section)
+        self.assertIn("Verification summary.", verification_section)
+        self.assertIn("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md", verification_section)
+        self.assertIn("/artifact?path=docs%2Fenhanced%2Fmodules%2Fmodule-package-llm.md", verification_section)
+        self.assertEqual(
+            verification_section.count("/file?path=docs%2Fgenerated%2Ffiles%2Ffile-src-docgen-llm-config-py.md"),
+            1,
+        )
+        self.assertIn("[file](../../generated/files/file-src-docgen-llm-config-py.md)", verification_section)
+        self.assertLess(verification_section.index("Structured verification summary"), verification_section.index("Verification summary."))
+        self.assertLess(verification_section.index("Verification summary."), verification_section.index("Open summary artifact"))
+        self.assertIn("Open summary artifact", verification_section)
+        self.assertNotIn('<pre class="artifact">', verification_section)
+        self.assertNotIn("| artifact | link |", verification_section)
         self.assertIn("Problems / Проблемы", problems)
         self.assertIn("Module-level problems", problems)
         self.assertIn("Issue-level problems", problems)
@@ -840,6 +874,7 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn(".markdown-body table", style)
         self.assertIn(".markdown-scroll", style)
         self.assertIn(".enhanced-document", style)
+        self.assertIn(".verification-document", style)
         self.assertIn("overflow-x: auto", style)
 
     def test_actions_post_build_ui_data_uses_allowlisted_runner(self) -> None:
@@ -1044,11 +1079,26 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Missing enhanced artifact", enhanced_section)
         self.assertNotIn('class="markdown-body enhanced-document"', enhanced_section)
 
+    def test_missing_verification_summary_artifact_renders_empty_state_safely(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        (enhanced / "verification" / "module-package-llm.verification.md").unlink()
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        module = urlopen(base_url + "/module/llm").read().decode("utf-8")
+        verification_section = module[module.index('<section id="verification"') : module.index('<section id="related-files"')]
+
+        self.assertIn("Structured verification summary", verification_section)
+        self.assertIn("Weak claims", verification_section)
+        self.assertIn("Missing verification summary artifact", verification_section)
+        self.assertNotIn('class="markdown-body verification-document"', verification_section)
+
     def test_module_markdown_rendering_uses_central_renderer_not_manual_markdown_parsing(self) -> None:
         source = inspect.getsource(ui_server)
 
         self.assertIn("render_artifact_content", source)
         self.assertIn("render_enhanced_document", source)
+        self.assertIn("render_verification_summary_document", source)
         self.assertNotIn("markdown.markdown", source)
         self.assertNotIn("nh3.clean", source)
 

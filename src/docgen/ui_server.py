@@ -493,6 +493,7 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
         "</section>",
         '<section id="verification" class="panel layer verification"><h2>Проверка / Verification</h2>',
         render_verification_structured_summary(verification),
+        render_verification_summary_document(verification, config),
         definition_list(
             [
                 ("Present", "yes" if verification.get("present") else "no"),
@@ -504,9 +505,6 @@ def render_module(module_name: str, config: UiServerConfig, data: UiDataBundle) 
             ],
             raw_labels={"Verification run", "Report JSON", "Summary artifact"},
         ),
-        render_artifact_text("Verification markdown summary", verification.get("summary_path"), config)
-        if verification.get("present")
-        else '<p class="empty-state">Verification is missing for this module.</p>',
         "</section>",
         '<section id="related-files" class="panel"><h2>Связанные файлы / Related files</h2>',
         render_source_files(factual.get("source_files")),
@@ -1981,6 +1979,27 @@ def render_enhanced_document(enhanced: dict[str, Any], config: UiServerConfig) -
     )
 
 
+def render_verification_summary_document(verification: dict[str, Any], config: UiServerConfig) -> str:
+    path = verification.get("summary_path")
+    if not path or not verification.get("present"):
+        return '<p class="empty-state">Verification is missing for this module.</p>'
+    try:
+        resolved = resolve_artifact_path(str(path), config)
+        artifact = render_artifact_content(resolved, view="rendered")
+    except ValueError as exc:
+        return f'<p class="empty-state">{esc(str(exc))}</p>'
+    except (FileNotFoundError, OSError):
+        return f'<p class="empty-state">Missing verification summary artifact: {esc(path)}</p>'
+
+    warnings = "".join(f'<p class="muted">{esc(warning)}</p>' for warning in artifact.warnings)
+    return (
+        '<div class="markdown-scroll">'
+        f'<div class="markdown-body verification-document">{artifact.rendered_html}</div>'
+        "</div>"
+        + warnings
+    )
+
+
 def load_artifact_display_content(path: str, config: UiServerConfig) -> DisplayContent:
     """Load artifact body for display only; never derive semantic UI state."""
     resolved = resolve_artifact_path(path, config)
@@ -2357,7 +2376,8 @@ th { color: var(--muted); font-size: 12px; font-weight: 650; }
   overflow-wrap: anywhere;
 }
 .factual-document,
-.enhanced-document {
+.enhanced-document,
+.verification-document {
   max-width: 100%;
 }
 .markdown-body h1,
