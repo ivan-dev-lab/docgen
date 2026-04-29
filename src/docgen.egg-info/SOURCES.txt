@@ -8,6 +8,7 @@ src/docgen/renderer.py
 src/docgen/ui_actions.py
 src/docgen/ui_content_contract.py
 src/docgen/ui_data.py
+src/docgen/ui_rendering.py
 src/docgen/ui_run_diff.py
 src/docgen/ui_server.py
 src/docgen.egg-info/PKG-INFO
@@ -39,6 +40,7 @@ tests/test_run_history.py
 tests/test_ui_actions.py
 tests/test_ui_content_contract.py
 tests/test_ui_data_cli.py
+tests/test_ui_rendering.py
 tests/test_ui_run_diff.py
 tests/test_ui_server_cli.py
 tests/test_verify_batch_cli.py

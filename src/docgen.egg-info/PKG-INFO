@@ -5,6 +5,8 @@ Summary: Deterministic project analyzer for source code documentation pipelines.
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: openai>=1.0.0
+Requires-Dist: Markdown>=3.8
+Requires-Dist: nh3>=0.2
 
 
 # Docgen

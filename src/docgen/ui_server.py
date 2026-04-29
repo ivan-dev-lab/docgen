@@ -12,7 +12,8 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from docgen.ui_actions import ActionError, ActionRunner, CONFIRMATION_PHRASE
-from docgen.ui_content_contract import DisplayContent, display_content_from_text
+from docgen.ui_content_contract import DisplayContent
+from docgen.ui_rendering import render_artifact_content
 from docgen.ui_run_diff import RunDiffError, build_run_diff
 
 REQUIRED_UI_DATA_FILES = {
@@ -28,7 +29,6 @@ OPTIONAL_UI_DATA_FILES = {
     "functions_index": "functions-index.json",
     "search_index": "search-index.json",
 }
-DISPLAY_TEXT_LIMIT = 200_000
 
 
 @dataclass(frozen=True)
@@ -1931,12 +1931,13 @@ def render_artifact_text(title: str, path: Any, config: UiServerConfig) -> str:
 
 def render_artifact_pre(path: str, config: UiServerConfig) -> str:
     try:
-        content = load_artifact_display_content(path, config)
+        resolved = resolve_artifact_path(path, config)
+        artifact = render_artifact_content(resolved, view="raw")
     except ValueError as exc:
         return f'<p class="muted">{esc(str(exc))}</p>'
     except FileNotFoundError:
         return f'<p class="muted">Missing artifact: {esc(path)}</p>'
-    return f'<pre class="artifact">{esc(content.text)}</pre>'
+    return artifact.rendered_html
 
 
 def load_artifact_display_content(path: str, config: UiServerConfig) -> DisplayContent:
@@ -1944,8 +1945,9 @@ def load_artifact_display_content(path: str, config: UiServerConfig) -> DisplayC
     resolved = resolve_artifact_path(path, config)
     if not resolved.exists() or not resolved.is_file():
         raise FileNotFoundError(path)
-    text = resolved.read_text(encoding="utf-8", errors="replace")
-    return display_content_from_text(text, limit=DISPLAY_TEXT_LIMIT)
+    artifact = render_artifact_content(resolved, view="raw")
+    truncated = any("truncated" in warning.lower() for warning in artifact.warnings)
+    return DisplayContent(text=artifact.raw_text, truncated=truncated)
 
 
 def render_error(message: str) -> str:
