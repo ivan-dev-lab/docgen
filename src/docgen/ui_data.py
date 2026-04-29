@@ -614,6 +614,8 @@ def module_search_records(modules: list[dict[str, Any]], generated_root: Path, e
         verification = nested_dict(module, "verification")
         factual_text = read_index_text(factual.get("module_doc_path"), generated_root)
         enhanced_text = read_index_text(enhanced.get("markdown_path"), enhanced_root)
+        # Markdown text is included only in search_text. Verdict/presence fields below
+        # are copied from the structured module record built from JSON/manifests.
         records.append(
             search_record(
                 entity_kind="module",
@@ -835,6 +837,7 @@ def file_doc_paths_by_source_file(modules: list[dict[str, Any]]) -> dict[str, st
 
 
 def read_index_text(path_value: Any, artifact_root: Path) -> str:
+    """Build-time plain-text search only; never a source for UI semantics."""
     if not path_value:
         return ""
     path = resolve_recorded_path(path_value, artifact_root)

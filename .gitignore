@@ -7,5 +7,5 @@ docs/
 .env
 .env.*
 !.env.example
-*.md
+tasks/
 *.log

@@ -19,7 +19,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from docgen.cli import main  # noqa: E402
-from docgen.ui_server import build_server_config, create_ui_server  # noqa: E402
+from docgen.ui_content_contract import DISPLAY_CONTENT_FIELDS, FORBIDDEN_MARKDOWN_SEMANTIC_FIELDS  # noqa: E402
+from docgen.ui_server import build_server_config, create_ui_server, load_artifact_display_content  # noqa: E402
 
 
 class FakeUiActionRunner:
@@ -943,6 +944,20 @@ class UiServerCliTests(unittest.TestCase):
         self.assertIn("Artifact", artifact_page)
         self.assertIn("Enhanced explanation.", artifact_page)
 
+    def test_artifact_loader_returns_display_content_only(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        artifact = enhanced / "modules" / "module-package-llm.md"
+        artifact.write_text("# Display\n\nwarning fail pass\nweak claims: 999\n", encoding="utf-8")
+        config = build_server_config(generated, enhanced, ui_data, strict=True)
+
+        content = load_artifact_display_content("docs/enhanced/modules/module-package-llm.md", config)
+        semantic_leaf_names = {field.rsplit(".", 1)[-1] for field in FORBIDDEN_MARKDOWN_SEMANTIC_FIELDS}
+
+        self.assertEqual(set(content.__dataclass_fields__), DISPLAY_CONTENT_FIELDS)
+        self.assertTrue(semantic_leaf_names.isdisjoint(content.__dataclass_fields__))
+        self.assertIn("weak claims: 999", content.text)
+
     def test_invalid_history_run_returns_not_found_and_empty_history_renders(self) -> None:
         root = self.make_temp_dir()
         generated, enhanced, ui_data = self.build_fixture(root)
@@ -1009,6 +1024,40 @@ class UiServerCliTests(unittest.TestCase):
         ok_page = urlopen(ok_base_url + "/problems").read().decode("utf-8")
         self.assertIn("Проблем не найдено", ok_page)
         self.assertNotEqual(no_data_page, ok_page)
+
+    def test_problems_page_uses_problems_index_not_markdown_summary(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, ui_data = self.build_fixture(root)
+        (enhanced / "verification" / "module-package-llm.verification.md").write_text(
+            "# Human summary\n\nwarning fail pass\nweak claims: 999\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            ui_data / "problems-index.json",
+            {
+                "schema_version": "1.0",
+                "status": "ok",
+                "summary": {
+                    "modules_with_warnings": 0,
+                    "modules_with_failures": 0,
+                    "modules_missing_enhanced": 0,
+                    "modules_missing_verification": 0,
+                    "weak_claims_total": 0,
+                    "unsupported_claims_total": 0,
+                    "missing_factual_support_total": 0,
+                    "missing_uncertainty_total": 0,
+                },
+                "module_problems": [],
+                "issue_problems": [],
+                "warnings": [],
+            },
+        )
+        base_url, _server, _thread = self.start_server(generated, enhanced, ui_data)
+
+        problems = urlopen(base_url + "/problems").read().decode("utf-8")
+
+        self.assertIn("<span>Weak claims</span><strong>0</strong>", problems)
+        self.assertNotIn("999", problems)
 
     def test_server_is_read_only_for_artifacts(self) -> None:
         root = self.make_temp_dir()

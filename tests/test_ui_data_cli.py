@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from docgen.cli import main  # noqa: E402
+from docgen.ui_content_contract import FORBIDDEN_MARKDOWN_SEMANTIC_FIELDS  # noqa: E402
 from docgen.ui_data import build_ui_data  # noqa: E402
 
 
@@ -57,7 +58,7 @@ class UiDataCliTests(unittest.TestCase):
         files_dir.mkdir(parents=True, exist_ok=True)
         for name in ("alpha", "beta", "missing"):
             (modules_dir / f"module-package-{name}.md").write_text(
-                f"# {name}\n\nThis markdown must not be parsed for UI semantics.\n",
+                f"# {name}\n\nThis markdown says warning fail pass and weak claims: 999.\n",
                 encoding="utf-8",
             )
             (files_dir / f"file-src-{name}-py.md").write_text(
@@ -100,7 +101,7 @@ class UiDataCliTests(unittest.TestCase):
             enhanced_path = enhanced / "modules" / f"module-package-{name}.md"
             enhanced_path.parent.mkdir(parents=True, exist_ok=True)
             enhanced_path.write_text(
-                "# Enhanced\n\nverdict: pass\nunsupported_claims: 999\n",
+                "# Enhanced\n\nwarning fail pass\nverdict: fail\nweak claims: 999\nunsupported_claims: 999\n",
                 encoding="utf-8",
             )
             self.write_json(
@@ -245,7 +246,7 @@ class UiDataCliTests(unittest.TestCase):
                 },
             )
             (verification_root / f"module-package-{name}.verification.md").write_text(
-                "# Human summary\n\nverdict: fail\nweak_claims: 999\n",
+                "# Human summary\n\nwarning fail pass\nverdict: fail\nweak_claims: 999\n",
                 encoding="utf-8",
             )
         self.write_json(
@@ -475,6 +476,39 @@ class UiDataCliTests(unittest.TestCase):
         self.assertEqual(modules["alpha"]["verification"]["verdict"], "warning")
         self.assertEqual(modules["alpha"]["verification"]["weak_claims_count"], 1)
         self.assertEqual(modules["alpha"]["verification"]["missing_factual_support_count"], 1)
+
+    def test_poisoned_markdown_does_not_drive_semantic_ui_state(self) -> None:
+        root = self.make_temp_dir()
+        generated, enhanced, output = self.build_fixture(root)
+        build_ui_data(generated, enhanced, output)
+
+        modules_index = json.loads((output / "modules-index.json").read_text(encoding="utf-8"))
+        problems_index = json.loads((output / "problems-index.json").read_text(encoding="utf-8"))
+        search_index = json.loads((output / "search-index.json").read_text(encoding="utf-8"))
+        modules = {module["name"]: module for module in modules_index["modules"]}
+        alpha_verification = modules["alpha"]["verification"]
+        beta_verification = modules["beta"]["verification"]
+        alpha_search = next(
+            record
+            for record in search_index["records"]
+            if record["entity_kind"] == "module" and record["title"] == "alpha"
+        )
+
+        self.assertEqual(alpha_verification["verdict"], "warning")
+        self.assertEqual(alpha_verification["verification_status"], "verified_warning")
+        self.assertEqual(alpha_verification["weak_claims_count"], 1)
+        self.assertEqual(alpha_verification["unsupported_claims_count"], 0)
+        self.assertEqual(alpha_verification["missing_factual_support_count"], 1)
+        self.assertEqual(beta_verification["verdict"], "pass")
+        self.assertEqual(beta_verification["weak_claims_count"], 0)
+        self.assertEqual(problems_index["summary"]["weak_claims_total"], 1)
+        self.assertEqual(problems_index["summary"]["unsupported_claims_total"], 0)
+        self.assertEqual(problems_index["summary"]["modules_with_failures"], 0)
+        self.assertIn("weak claims: 999", alpha_search["search_text"])
+        self.assertIn("verdict: fail", alpha_search["search_text"])
+        self.assertEqual(alpha_search["verification_verdict"], "warning")
+        self.assertTrue(FORBIDDEN_MARKDOWN_SEMANTIC_FIELDS)
+        self.assertNotIn("weak_claims_count", alpha_search)
 
     def test_problems_index_contains_module_and_issue_problems(self) -> None:
         root = self.make_temp_dir()

@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from docgen.ui_actions import ActionError, ActionRunner, CONFIRMATION_PHRASE
+from docgen.ui_content_contract import DisplayContent, display_content_from_text
 from docgen.ui_run_diff import RunDiffError, build_run_diff
 
 REQUIRED_UI_DATA_FILES = {
@@ -1930,15 +1931,21 @@ def render_artifact_text(title: str, path: Any, config: UiServerConfig) -> str:
 
 def render_artifact_pre(path: str, config: UiServerConfig) -> str:
     try:
-        resolved = resolve_artifact_path(path, config)
+        content = load_artifact_display_content(path, config)
     except ValueError as exc:
         return f'<p class="muted">{esc(str(exc))}</p>'
-    if not resolved.exists() or not resolved.is_file():
+    except FileNotFoundError:
         return f'<p class="muted">Missing artifact: {esc(path)}</p>'
+    return f'<pre class="artifact">{esc(content.text)}</pre>'
+
+
+def load_artifact_display_content(path: str, config: UiServerConfig) -> DisplayContent:
+    """Load artifact body for display only; never derive semantic UI state."""
+    resolved = resolve_artifact_path(path, config)
+    if not resolved.exists() or not resolved.is_file():
+        raise FileNotFoundError(path)
     text = resolved.read_text(encoding="utf-8", errors="replace")
-    if len(text) > DISPLAY_TEXT_LIMIT:
-        text = text[:DISPLAY_TEXT_LIMIT] + "\n\n[truncated]"
-    return f'<pre class="artifact">{esc(text)}</pre>'
+    return display_content_from_text(text, limit=DISPLAY_TEXT_LIMIT)
 
 
 def render_error(message: str) -> str:
